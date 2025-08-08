@@ -1,111 +1,114 @@
 import streamlit as st
+from pymongo import MongoClient
+import matplotlib.pyplot as plt
+import seaborn as sns
 import pandas as pd
-import pickle
-import os
+import numpy as np
 
-# Define the file paths for the saved model and label encoders
-model_path = 'Data/multioutput_rf_model.pkl'
-label_encoders_path = 'Data/label_encoders.pkl'
+# Configuration de la connexion à MongoDB
+uri = "votre_chaine_de_connexion_mongodb_atlas"
+client = MongoClient(uri)
+db = client.maBaseDeDonnees
+collection = db.maCollection
 
-# Check if files exist (important for Streamlit deployment)
-if not os.path.exists(model_path) or not os.path.exists(label_encoders_path):
-    st.error("Model or label encoder files not found. Please ensure they are in the specified Google Drive paths.")
-else:
-    # Load the trained model and label encoders
-    try:
-        with open(model_path, 'rb') as f:
-            model = pickle.load(f)
-        with open(label_encoders_path, 'rb') as f:
-            label_encoders = pickle.load(f)
-        st.success("Model and label encoders loaded successfully.")
+def insert_data(nom, age, genre):
+    result = collection.insert_one({"nom": nom, "age": age, "genre": genre})
+    return result.inserted_id
 
-        # Get the expected feature columns from the loaded label encoders (excluding target columns)
-        # Assuming all columns in label_encoders except 'genre' and 'Clavier' are features
-        feature_columns = [col for col in label_encoders.keys() if col not in ['genre', 'Clavier']]
+def get_data():
+    return list(collection.find({}))
 
-        def predict_user_data(input_df):
-            """
-            Preprocesses input data, makes predictions, and inverse transforms them.
-            """
-            processed_df = input_df.copy()
+def update_data(query, new_values):
+    result = collection.update_one(query, {"$set": new_values})
+    return result.modified_count
 
-            # Preprocess categorical columns using loaded encoders
-            for col in feature_columns:
-                if col in processed_df.columns:
-                    le = label_encoders[col]
-                    # Convert to string to handle potential mixed types
-                    processed_df[col] = processed_df[col].astype(str)
-                    # Handle unseen categories by mapping to a placeholder if necessary
-                    # For simplicity here, we'll map unseen to the encoding of 'Aucun' if it exists, or -1
-                    try:
-                        processed_df[col] = le.transform(processed_df[col])
-                    except ValueError:
-                         # If 'Aucun' was in the training data, map unseen to its encoding
-                        if 'Aucun' in le.classes_:
-                            unseen_encoding = le.transform(['Aucun'])[0]
-                            processed_df[col] = processed_df[col].apply(lambda x: le.transform([x])[0] if x in le.classes_ else unseen_encoding)
-                        else:
-                             # Otherwise, map to -1 (handle this in model if necessary)
-                             processed_df[col] = processed_df[col].apply(lambda x: le.transform([x])[0] if x in le.classes_ else -1)
+def delete_data(query):
+    result = collection.delete_one(query)
+    return result.deleted_count
 
-                else:
-                    # Handle missing feature columns in input data (e.g., add with a default value)
-                    processed_df[col] = -1 # Or some other appropriate default
-                    st.warning(f"Missing feature column in input data: {col}. Added with default value.")
+def main():
+    st.title("Application Altrad IA")
 
+    # Barre latérale pour la navigation
+    page = st.sidebar.radio("Aller à", ["Accueil", "Insérer des données", "Visualisation", "Prédictions", "Mettre à jour", "Supprimer"])
 
-            # Ensure columns match the training data features and are in the correct order
-            # Drop any columns in processed_df that are not in feature_columns
-            extra_cols = [col for col in processed_df.columns if col not in feature_columns]
-            processed_df = processed_df.drop(columns=extra_cols)
+    if page == "Accueil":
+        st.write("Bienvenue dans l'application Altrad IA!")
+    elif page == "Insérer des données":
+        st.header("Insérer des données")
+        nom = st.text_input("Nom")
+        age = st.number_input("Âge", min_value=0, max_value=120)
+        genre = st.selectbox("Genre", ["Homme", "Femme"])
+        if st.button("Insérer"):
+            inserted_id = insert_data(nom, age, genre)
+            st.success(f"Donnée insérée avec l'ID: {inserted_id}")
+    elif page == "Visualisation":
+        st.header("Visualisation des données")
 
-            # Reindex to ensure the order of columns matches the training data
-            processed_df = processed_df.reindex(columns=feature_columns, fill_value=-1) # Use -1 for any truly missing columns after reindexing
+        # Exemple de données pour la visualisation
+        data = get_data()
+        if data:
+            df = pd.DataFrame(data)
+            # Conversion du genre en numérique pour la visualisation (optionnel)
+            df['genre_numeric'] = df['genre'].map({'Homme': 0, 'Femme': 1})
 
+            # Box plot pour la distribution par genre
+            fig, ax = plt.subplots()
+            sns.countplot(x='genre', data=df, ax=ax)
+            ax.set_title("Current Gender Distribution")
+            ax.set_xlabel("Gender")
+            ax.set_ylabel("Count")
+            st.pyplot(fig)
 
-            # Make predictions
-            predictions_encoded = model.predict(processed_df)
+            # Deuxième visualisation : Nombre d'employés par genre
+            fig2, ax2 = plt.subplots()
+            sns.countplot(x='genre', data=df, ax=ax2)
+            ax2.set_title('Nombre d\'employés par genre (Inventaire)')
+            ax2.set_xlabel("Genre")
+            ax2.set_ylabel("Compte")
+            st.pyplot(fig2)
 
-            # Inverse transform predictions
-            predicted_genre_encoded = predictions_encoded[:, 0]
-            predicted_clavier_encoded = predictions_encoded[:, 1]
+        else:
+            st.warning("Aucune donnée disponible pour la visualisation.")
+    elif page == "Prédictions":
+        st.header("Prédictions des besoins futurs")
 
-            genre_le = label_encoders['genre']
-            clavier_le = label_encoders['Clavier']
+        # Exemple de données pour les prédictions
+        materials = ['Type A', 'Type B', 'Type C']
+        counts = np.random.randint(100, size=len(materials))
 
-            # Handle potential unseen encoded values in predictions during inverse transform
-            # This can happen if the model predicts an encoding that wasn't in the original classes
-            predicted_genre = [genre_le.inverse_transform([val])[0] if val in genre_le.transform(genre_le.classes_) else 'Unknown' for val in predicted_genre_encoded]
-            predicted_Clavier = [clavier_le.inverse_transform([val])[0] if val in clavier_le.transform(clavier_le.classes_) else 'Unknown' for val in predicted_clavier_encoded]
+        fig, ax = plt.subplots()
+        ax.bar(materials, counts)
+        ax.set_title('Predicted Future Material Needs')
+        ax.set_xlabel('Material Type')
+        ax.set_ylabel('Estimated Count')
+        st.pyplot(fig)
 
+        # Évolution des effectifs
+        years = np.arange(2020, 2031)
+        employees = np.random.randint(50, size=len(years)) + np.arange(len(years)) * 5
 
-            # Add predictions to the original input DataFrame
-            input_df['predicted_genre'] = predicted_genre
-            input_df['predicted_Clavier'] = predicted_Clavier
+        fig2, ax2 = plt.subplots()
+        ax2.plot(years, employees)
+        ax2.set_title('Évolution des effectifs (historique et prédictions)')
+        ax2.set_xlabel('Année')
+        ax2.set_ylabel('Nombre d\'employés')
+        st.pyplot(fig2)
+    elif page == "Mettre à jour":
+        st.header("Mettre à jour les données")
+        old_nom = st.text_input("Nom actuel")
+        new_nom = st.text_input("Nouveau Nom")
+        new_age = st.number_input("Nouvel Âge", min_value=0, max_value=120)
+        new_genre = st.selectbox("Nouveau Genre", ["Homme", "Femme"])
+        if st.button("Mettre à jour"):
+            modified_count = update_data({"nom": old_nom}, {"nom": new_nom, "age": new_age, "genre": new_genre})
+            st.success(f"Données mises à jour: {modified_count}")
+    elif page == "Supprimer":
+        st.header("Supprimer les données")
+        nom = st.text_input("Nom à supprimer")
+        if st.button("Supprimer"):
+            deleted_count = delete_data({"nom": nom})
+            st.success(f"Données supprimées: {deleted_count}")
 
-            return input_df
-
-        # Streamlit App
-        st.title("User Material Prediction App")
-
-        st.write("Upload a CSV file containing user material data to predict 'genre' and 'Clavier'.")
-
-        uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
-
-        if uploaded_file is not None:
-            try:
-                input_df = pd.read_csv(uploaded_file)
-                st.write("Original Data:")
-                st.dataframe(input_df)
-
-                # Make predictions and get the DataFrame with predictions
-                output_df = predict_user_data(input_df.copy()) # Use a copy to avoid modifying the original uploaded_file data
-
-                st.write("Data with Predictions:")
-                st.dataframe(output_df)
-
-            except Exception as e:
-                st.error(f"An error occurred during processing: {e}")
-
-    except Exception as e:
-        st.error(f"An error occurred during model or label encoder loading: {e}")
+if __name__ == "__main__":
+    main()
