@@ -1,35 +1,15 @@
 import streamlit as st
-from pymongo import MongoClient
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import numpy as np
 
-# Configuration de la connexion à MongoDB
-uri = "votre_chaine_de_connexion_mongodb_atlas"
-client = MongoClient(uri)
-db = client.maBaseDeDonnees
-collection = db.maCollection
-
-def insert_data(nom, age, genre):
-    result = collection.insert_one({"nom": nom, "age": age, "genre": genre})
-    return result.inserted_id
-
-def get_data():
-    return list(collection.find({}))
-
-def update_data(query, new_values):
-    result = collection.update_one(query, {"$set": new_values})
-    return result.modified_count
-
-def delete_data(query):
-    result = collection.delete_one(query)
-    return result.deleted_count
+# Import de la connexion MongoDB depuis mongo_connect.py
+from BD_Mongo_co.mongo_connect import inventaire_collection, sharepoint_collection, effectif_collection
+from api.inventaire_api import insert_inventaire, get_inventaire, update_inventaire, delete_inventaire
 
 def main():
     st.title("Application Altrad IA")
-
-    # Barre latérale pour la navigation
     page = st.sidebar.radio("Aller à", ["Accueil", "Insérer des données", "Visualisation", "Prédictions", "Mettre à jour", "Supprimer"])
 
     if page == "Accueil":
@@ -37,37 +17,47 @@ def main():
     elif page == "Insérer des données":
         st.header("Insérer des données")
         nom = st.text_input("Nom")
-        age = st.number_input("Âge", min_value=0, max_value=120)
+        prenom = st.text_input("Prénom")
+        nature_contrat = st.selectbox("Nature du contrat", ["Contrat à durée indéterminée", "Contrat à durée déterminée"])
+        emploi = st.selectbox("Emploi", ["PEINTRE", "CHEF D EQUIPE", "MONTEUR ECHAFAUDEUR", "QHSE MANAGER ANGOLA AFRICA REGIO", "RESP POLE ADMINISTRATIF"])
+        debut_contrat = st.date_input("Début du contrat")
+        cat_remuneration = st.selectbox("Catégorie rémunération", ["ETAM ART 36 FORFAIT", "AUTRE"])
+        affectation1 = st.text_input("Affectation 1", value="GRAND PROJET")
+        affectation2 = st.text_input("Affectation 2", value="BU GRAND PROJET INDU")
         genre = st.selectbox("Genre", ["Homme", "Femme"])
         if st.button("Insérer"):
-            inserted_id = insert_data(nom, age, genre)
+            doc = {
+                "Nom": nom,
+                "Prénom": prenom,
+                "L nature contrat": nature_contrat,
+                "L Emploi": emploi,
+                "D Début contrat": debut_contrat.strftime("%Y-%m-%d"),
+                "L Cat. rémunération": cat_remuneration,
+                "L Affectation 1": affectation1,
+                "L Affectation 2": affectation2,
+                "genre": genre
+            }
+            inserted_id = insert_inventaire(doc)
             st.success(f"Donnée insérée avec l'ID: {inserted_id}")
     elif page == "Visualisation":
         st.header("Visualisation des données")
-
-        # Exemple de données pour la visualisation
-        data = get_data()
+        data = get_inventaire()
         if data:
             df = pd.DataFrame(data)
-            # Conversion du genre en numérique pour la visualisation (optionnel)
             df['genre_numeric'] = df['genre'].map({'Homme': 0, 'Femme': 1})
-
-            # Box plot pour la distribution par genre
+            df_dict = df.where(pd.notnull(df), None).to_dict(orient='records')
             fig, ax = plt.subplots()
             sns.countplot(x='genre', data=df, ax=ax)
             ax.set_title("Current Gender Distribution")
             ax.set_xlabel("Gender")
             ax.set_ylabel("Count")
             st.pyplot(fig)
-
-            # Deuxième visualisation : Nombre d'employés par genre
             fig2, ax2 = plt.subplots()
             sns.countplot(x='genre', data=df, ax=ax2)
             ax2.set_title('Nombre d\'employés par genre (Inventaire)')
             ax2.set_xlabel("Genre")
             ax2.set_ylabel("Compte")
             st.pyplot(fig2)
-
         else:
             st.warning("Aucune donnée disponible pour la visualisation.")
     elif page == "Prédictions":
@@ -98,17 +88,36 @@ def main():
         st.header("Mettre à jour les données")
         old_nom = st.text_input("Nom actuel")
         new_nom = st.text_input("Nouveau Nom")
-        new_age = st.number_input("Nouvel Âge", min_value=0, max_value=120)
+        new_prenom = st.text_input("Nouveau Prénom")
+        new_nature_contrat = st.selectbox("Nouvelle nature du contrat", ["Contrat à durée indéterminée", "Contrat à durée déterminée"])
+        new_emploi = st.selectbox("Nouvel Emploi", ["PEINTRE", "CHEF D EQUIPE", "MONTEUR ECHAFAUDEUR", "QHSE MANAGER ANGOLA AFRICA REGIO", "RESP POLE ADMINISTRATIF"])
+        new_debut_contrat = st.date_input("Nouveau début du contrat")
+        new_cat_remuneration = st.selectbox("Nouvelle catégorie rémunération", ["ETAM ART 36 FORFAIT", "AUTRE"])
+        new_affectation1 = st.text_input("Nouvelle Affectation 1", value="GRAND PROJET")
+        new_affectation2 = st.text_input("Nouvelle Affectation 2", value="BU GRAND PROJET INDU")
         new_genre = st.selectbox("Nouveau Genre", ["Homme", "Femme"])
         if st.button("Mettre à jour"):
-            modified_count = update_data({"nom": old_nom}, {"nom": new_nom, "age": new_age, "genre": new_genre})
+            query = {"Nom": old_nom}
+            new_values = {
+                "Nom": new_nom,
+                "Prénom": new_prenom,
+                "L nature contrat": new_nature_contrat,
+                "L Emploi": new_emploi,
+                "D Début contrat": new_debut_contrat.strftime("%Y-%m-%d"),
+                "L Cat. rémunération": new_cat_remuneration,
+                "L Affectation 1": new_affectation1,
+                "L Affectation 2": new_affectation2,
+                "genre": new_genre
+            }
+            modified_count = update_inventaire(query, new_values)
             st.success(f"Données mises à jour: {modified_count}")
     elif page == "Supprimer":
         st.header("Supprimer les données")
         nom = st.text_input("Nom à supprimer")
         if st.button("Supprimer"):
-            deleted_count = delete_data({"nom": nom})
+            deleted_count = delete_inventaire({"Nom": nom})
             st.success(f"Données supprimées: {deleted_count}")
 
 if __name__ == "__main__":
     main()
+
