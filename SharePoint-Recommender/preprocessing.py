@@ -1,41 +1,27 @@
 """
-===============================================================================
-                    SHAREPOINT RECOMMENDER
-                       PREPROCESSING ML
-===============================================================================
+============================================================
+SHAREPOINT RECOMMENDER - PREPROCESSING V3
+============================================================
 
-Ce fichier intervient APRES le nettoyage ETL.
+Préparation des données pour le système de recommandation.
 
-Le nettoyage est déjà réalisé par :
+Entrée :
+    CSV nettoyé
 
-    1. ETL.py
-    2. refactorCSV.py
+Sorties :
+    processed/interactions.parquet
+    processed/resources.parquet
 
-Ce module prépare uniquement les données pour le Machine Learning.
+Structure interactions :
+    user
+    resource
 
-Pipeline :
-
-    BD_Sharepoint_Clean.csv
-            |
-            v
-    Validation des colonnes
-            |
-            v
-    Suppression des utilisateurs invalides
-            |
-            v
-    Création d'une ressource SharePoint
-            |
-            v
-    Suppression des doublons
-            |
-            v
-    Création des interactions
-            |
-            v
-    Données prêtes pour le recommender
-
-===============================================================================
+Structure resources :
+    resource
+    site
+    sous-site
+    bibliothèque
+    liste
 """
 
 from pathlib import Path
@@ -43,147 +29,90 @@ from pathlib import Path
 import pandas as pd
 
 
-# =============================================================================
+# ============================================================
 # CONFIGURATION
-# =============================================================================
+# ============================================================
 
-DATA_PATH = Path(
-    "data/BD_Sharepoint_Clean.csv"
-)
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
 
-PROCESSED_PATH = Path(
-    "processed"
-)
+PROCESSED_DIR = PROJECT_DIR / "processed"
 
-PROCESSED_PATH.mkdir(
+PROCESSED_DIR.mkdir(
     parents=True,
     exist_ok=True
 )
 
 
-# =============================================================================
-# COLONNES ATTENDUES
-# =============================================================================
+# ============================================================
+# FICHIER CSV
+# ============================================================
 
-EXPECTED_COLUMNS = [
-    "site",
-    "sous-site",
-    "liste",
-    "bibliothèque",
-    "users",
-]
+# IMPORTANT :
+# Modifie uniquement cette ligne si ton CSV porte
+# un autre nom ou se trouve ailleurs.
+
+CSV_FILE = PROJECT_DIR / "Data" / "BD_Sharepoint_Clean.csv"
 
 
-# =============================================================================
+# ============================================================
+# FICHIERS DE SORTIE
+# ============================================================
+
+INTERACTIONS_FILE = (
+    PROCESSED_DIR / "interactions.parquet"
+)
+
+RESOURCES_FILE = (
+    PROCESSED_DIR / "resources.parquet"
+)
+
+
+# ============================================================
 # UTILISATEURS INVALIDES
-# =============================================================================
+# ============================================================
 
 INVALID_USERS = {
+    "",
     "aucun",
+    "none",
+    "null",
+    "nan",
     "pas de droit",
     "inconnu",
-    "",
-    "nan",
-    "none",
+    "unknown"
 }
 
 
-# =============================================================================
-# CHARGEMENT
-# =============================================================================
+# ============================================================
+# CHARGEMENT DU CSV
+# ============================================================
 
-def load_data():
-    """
-    Charge le CSV déjà nettoyé.
+def load_csv():
 
-    Aucun nettoyage métier n'est réalisé ici.
-    """
-
-    if not DATA_PATH.exists():
+    if not CSV_FILE.exists():
 
         raise FileNotFoundError(
-            f"""
-Fichier introuvable :
-
-    {DATA_PATH}
-
-Place BD_Sharepoint_Clean.csv dans :
-
-    data/
-"""
+            f"\nCSV introuvable : {CSV_FILE}\n"
+            "\nModifie CSV_FILE dans preprocessing.py."
         )
 
     df = pd.read_csv(
-        DATA_PATH,
-        encoding="utf-8"
+        CSV_FILE,
+        dtype=str
     )
 
-    print(
-        f"CSV chargé : {len(df):,} lignes"
+    # Suppression des espaces inutiles
+    df.columns = (
+        df.columns
+        .str.strip()
     )
 
-    return df
-
-
-# =============================================================================
-# VALIDATION
-# =============================================================================
-
-def validate_data(df):
-    """
-    Vérifie que toutes les colonnes nécessaires
-    sont présentes.
-    """
-
-    missing_columns = [
-        column
-        for column in EXPECTED_COLUMNS
-        if column not in df.columns
-    ]
-
-    if missing_columns:
-
-        raise ValueError(
-            "Colonnes manquantes : "
-            + ", ".join(
-                missing_columns
-            )
-        )
-
-    print(
-        "✓ Structure du CSV valide"
-    )
-
-
-# =============================================================================
-# NORMALISATION MINIMALE
-# =============================================================================
-
-def normalize_columns(df):
-    """
-    Effectue uniquement une normalisation technique.
-
-    Le nettoyage métier a déjà été réalisé par l'ETL.
-
-    On supprime notamment les espaces inutiles
-    autour des valeurs.
-    """
-
-    df = df.copy()
-
-    columns = [
-        "site",
-        "sous-site",
-        "liste",
-        "bibliothèque",
-        "users",
-    ]
-
-    for column in columns:
+    for column in df.columns:
 
         df[column] = (
             df[column]
-            .fillna("aucun")
+            .fillna("")
             .astype(str)
             .str.strip()
         )
@@ -191,90 +120,90 @@ def normalize_columns(df):
     return df
 
 
-# =============================================================================
-# FILTRAGE DES UTILISATEURS
-# =============================================================================
+# ============================================================
+# VERIFICATION DE LA STRUCTURE
+# ============================================================
 
-def filter_valid_users(df):
-    """
-    Supprime les lignes qui ne correspondent
-    pas à un véritable utilisateur.
+def validate_columns(df):
 
-    Exemple :
+    required_columns = {
+        "site",
+        "sous-site",
+        "liste",
+        "bibliothèque",
+        "users"
+    }
 
-        users = aucun
+    missing = (
+        required_columns
+        - set(df.columns)
+    )
 
-    ne doit PAS devenir un utilisateur du modèle.
+    if missing:
 
-    En revanche :
+        raise ValueError(
+            "Colonnes manquantes : "
+            + ", ".join(sorted(missing))
+        )
 
-        liste = aucun
+    print("✓ Structure du CSV valide")
 
-    ou :
 
-        bibliothèque = aucun
+# ============================================================
+# NETTOYAGE DES UTILISATEURS
+# ============================================================
 
-    restent parfaitement valides.
-    """
+def clean_users(df):
 
-    normalized_users = (
+    initial_count = len(df)
+
+    # Normalisation
+    df["users"] = (
         df["users"]
-        .str.lower()
         .str.strip()
+        .str.lower()
     )
 
-    mask = ~normalized_users.isin(
-        INVALID_USERS
-    )
-
-    filtered_df = df[
-        mask
+    # Suppression des utilisateurs invalides
+    df = df[
+        ~df["users"].isin(
+            INVALID_USERS
+        )
     ].copy()
 
-    removed = len(df) - len(
-        filtered_df
+    removed = (
+        initial_count - len(df)
     )
 
     print(
         f"✓ Utilisateurs invalides supprimés : "
-        f"{removed:,}"
+        f"{removed}"
     )
 
-    return filtered_df
+    return df
 
 
-# =============================================================================
+# ============================================================
 # CREATION DE LA RESSOURCE
-# =============================================================================
+# ============================================================
 
-def create_resource(df):
+def create_resource_column(df):
+
     """
-    Crée un identifiant unique représentant
-    une ressource SharePoint.
-
     Une ressource est définie par :
 
-        Site
-        Sous-site
-        Bibliothèque
-        Liste
+        site
+        sous-site
+        bibliothèque
+        liste
 
     Exemple :
 
-        Altrad Services France
-        Cash
-        aucun
-        aucun
-
-    devient :
-
         Altrad Services France |
-        Cash |
+        Direction financière |
         aucun |
         aucun
     """
-
-    df = df.copy()
 
     df["resource"] = (
         df["site"]
@@ -289,243 +218,140 @@ def create_resource(df):
     return df
 
 
-# =============================================================================
-# SUPPRESSION DES DOUBLONS
-# =============================================================================
+# ============================================================
+# CREATION DE resources.parquet
+# ============================================================
 
-def remove_duplicates(df):
-    """
-    Supprime les doublons utilisateur / ressource.
+def create_resources(df):
 
-    Si :
-
-        adam -> Cash
-
-    apparaît plusieurs fois, le modèle considère
-    qu'il s'agit d'une seule interaction.
-    """
-
-    before = len(df)
-
-    df = df.drop_duplicates(
-        subset=[
-            "users",
-            "resource",
+    resources = (
+        df[
+            [
+                "resource",
+                "site",
+                "sous-site",
+                "bibliothèque",
+                "liste"
+            ]
         ]
-    ).copy()
-
-    removed = before - len(df)
-
-    print(
-        f"✓ Doublons utilisateur/ressource supprimés : "
-        f"{removed:,}"
+        .drop_duplicates(
+            subset=["resource"]
+        )
+        .reset_index(drop=True)
     )
 
-    return df
+    resources.to_parquet(
+        RESOURCES_FILE,
+        index=False
+    )
+
+    return resources
 
 
-# =============================================================================
-# CREATION DES INTERACTIONS
-# =============================================================================
+# ============================================================
+# CREATION DE interactions.parquet
+# ============================================================
 
 def create_interactions(df):
-    """
-    Conserve uniquement les informations
-    nécessaires au système de recommandation.
 
-    Une interaction signifie :
-
-        utilisateur X
-        utilise / possède
-        ressource Y
-    """
-
-    interactions = df[
-        [
-            "users",
-            "resource",
+    interactions = (
+        df[
+            [
+                "users",
+                "resource"
+            ]
         ]
-    ].copy()
+        .rename(
+            columns={
+                "users": "user"
+            }
+        )
+        .drop_duplicates(
+            subset=[
+                "user",
+                "resource"
+            ]
+        )
+        .reset_index(drop=True)
+    )
 
-    interactions = interactions.rename(
-        columns={
-            "users": "user"
-        }
+    interactions.to_parquet(
+        INTERACTIONS_FILE,
+        index=False
     )
 
     return interactions
 
 
-# =============================================================================
-# STATISTIQUES
-# =============================================================================
+# ============================================================
+# PROGRAMME PRINCIPAL
+# ============================================================
 
-def create_statistics(
-    df,
-    interactions
-):
-    """
-    Calcule les statistiques principales
-    du dataset préparé.
-    """
-
-    statistics = {
-        "rows_original": len(df),
-
-        "users": interactions[
-            "user"
-        ].nunique(),
-
-        "resources": interactions[
-            "resource"
-        ].nunique(),
-
-        "interactions": len(
-            interactions
-        ),
-
-        "sites": df[
-            "site"
-        ].nunique(),
-
-        "subsites": df[
-            "sous-site"
-        ].nunique(),
-
-        "libraries": df[
-            "bibliothèque"
-        ].nunique(),
-
-        "lists": df[
-            "liste"
-        ].nunique(),
-    }
-
-    return statistics
-
-
-# =============================================================================
-# SAUVEGARDE
-# =============================================================================
-
-def save_data(
-    df,
-    interactions
-):
-    """
-    Sauvegarde les données préparées.
-
-    Parquet est utilisé car il est plus efficace
-    que CSV pour les traitements ML.
-    """
-
-    # Dataset complet préparé.
-    df.to_parquet(
-        PROCESSED_PATH
-        / "clean_data.parquet",
-        index=False
-    )
-
-    # Interactions utilisateur/ressource.
-    interactions.to_parquet(
-        PROCESSED_PATH
-        / "interactions.parquet",
-        index=False
-    )
-
-    print(
-        "✓ Données sauvegardées dans processed/"
-    )
-
-
-# =============================================================================
-# PIPELINE PRINCIPAL
-# =============================================================================
-
-def run_preprocessing():
+def main():
 
     print()
     print("=" * 70)
-    print(
-        "SHAREPOINT RECOMMENDER - PREPROCESSING"
-    )
+    print("SHAREPOINT RECOMMENDER - PREPROCESSING V3")
     print("=" * 70)
 
-    # -------------------------------------------------------------------------
-    # 1. Chargement
-    # -------------------------------------------------------------------------
+    # --------------------------------------------------------
+    # Chargement
+    # --------------------------------------------------------
 
-    df = load_data()
+    df = load_csv()
 
-    # -------------------------------------------------------------------------
-    # 2. Validation
-    # -------------------------------------------------------------------------
-
-    validate_data(
-        df
+    print(
+        f"CSV chargé : {len(df):,} lignes"
     )
 
-    # -------------------------------------------------------------------------
-    # 3. Normalisation technique
-    # -------------------------------------------------------------------------
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
 
-    df = normalize_columns(
-        df
+    validate_columns(df)
+
+    # --------------------------------------------------------
+    # Nettoyage utilisateurs
+    # --------------------------------------------------------
+
+    df = clean_users(df)
+
+    # --------------------------------------------------------
+    # Création ressource
+    # --------------------------------------------------------
+
+    df = create_resource_column(df)
+
+    # --------------------------------------------------------
+    # Interactions
+    # --------------------------------------------------------
+
+    interactions = create_interactions(df)
+
+    # --------------------------------------------------------
+    # Ressources
+    # --------------------------------------------------------
+
+    resources = create_resources(df)
+
+    # --------------------------------------------------------
+    # Statistiques
+    # --------------------------------------------------------
+
+    print(
+        f"✓ Doublons utilisateur/ressource supprimés : "
+        f"{len(df) - len(interactions)}"
     )
 
-    # -------------------------------------------------------------------------
-    # 4. Suppression des faux utilisateurs
-    # -------------------------------------------------------------------------
-
-    df = filter_valid_users(
-        df
+    print(
+        f"✓ Interactions sauvegardées : "
+        f"{INTERACTIONS_FILE}"
     )
 
-    # -------------------------------------------------------------------------
-    # 5. Création de la ressource
-    # -------------------------------------------------------------------------
-
-    df = create_resource(
-        df
+    print(
+        f"✓ Ressources sauvegardées : "
+        f"{RESOURCES_FILE}"
     )
-
-    # -------------------------------------------------------------------------
-    # 6. Suppression des doublons
-    # -------------------------------------------------------------------------
-
-    df = remove_duplicates(
-        df
-    )
-
-    # -------------------------------------------------------------------------
-    # 7. Création des interactions
-    # -------------------------------------------------------------------------
-
-    interactions = create_interactions(
-        df
-    )
-
-    # -------------------------------------------------------------------------
-    # 8. Statistiques
-    # -------------------------------------------------------------------------
-
-    statistics = create_statistics(
-        df,
-        interactions
-    )
-
-    # -------------------------------------------------------------------------
-    # 9. Sauvegarde
-    # -------------------------------------------------------------------------
-
-    save_data(
-        df,
-        interactions
-    )
-
-    # -------------------------------------------------------------------------
-    # 10. Résumé
-    # -------------------------------------------------------------------------
 
     print()
     print("=" * 70)
@@ -534,49 +360,43 @@ def run_preprocessing():
 
     print(
         f"Utilisateurs       : "
-        f"{statistics['users']:,}"
+        f"{interactions['user'].nunique():,}"
     )
 
     print(
         f"Ressources         : "
-        f"{statistics['resources']:,}"
+        f"{resources['resource'].nunique():,}"
     )
 
     print(
         f"Interactions       : "
-        f"{statistics['interactions']:,}"
+        f"{len(interactions):,}"
     )
 
     print(
         f"Sites              : "
-        f"{statistics['sites']:,}"
+        f"{resources['site'].nunique():,}"
     )
 
     print(
         f"Sous-sites         : "
-        f"{statistics['subsites']:,}"
+        f"{resources['sous-site'].nunique():,}"
     )
 
     print(
         f"Bibliothèques      : "
-        f"{statistics['libraries']:,}"
+        f"{resources['bibliothèque'].nunique():,}"
     )
 
     print(
         f"Listes             : "
-        f"{statistics['lists']:,}"
+        f"{resources['liste'].nunique():,}"
     )
 
     print()
-    print(
-        "Preprocessing ML terminé."
-    )
+    print("Preprocessing ML terminé.")
+    print("=" * 70)
 
-
-# =============================================================================
-# EXECUTION
-# =============================================================================
 
 if __name__ == "__main__":
-
-    run_preprocessing()
+    main()

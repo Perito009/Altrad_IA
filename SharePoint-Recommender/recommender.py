@@ -1,29 +1,31 @@
 """
 ============================================================
-RECOMMENDER.PY - VERSION 3
+SHAREPOINT RECOMMENDER - RECOMMENDER V3
 ============================================================
 
-SYSTÈME DE RECOMMANDATION HYBRIDE SHAREPOINT
+Moteur de recommandation hybride.
 
-Le moteur combine :
+Combine :
 
-    1. Similarité entre utilisateurs
-    2. Popularité des ressources
+    1. Filtrage collaboratif
+    2. Popularité
     3. Contexte SharePoint
 
-Score final :
+Fichiers utilisés :
 
-    60 % -> collaboratif
-    25 % -> popularité
-    15 % -> contexte
+    processed/interactions.parquet
+    processed/resources.parquet
+    processed/user_neighbors.parquet
+    processed/resource_popularity.parquet
+
+Sortie :
+
+    Top N recommandations pour un utilisateur.
 """
 
 from pathlib import Path
 
 import pandas as pd
-
-from context import calculate_context_score
-from popularity import calculate_popularity
 
 
 # ============================================================
@@ -38,22 +40,30 @@ INTERACTIONS_FILE = (
     PROCESSED_DIR / "interactions.parquet"
 )
 
+RESOURCES_FILE = (
+    PROCESSED_DIR / "resources.parquet"
+)
+
 NEIGHBORS_FILE = (
     PROCESSED_DIR / "user_neighbors.parquet"
 )
 
+POPULARITY_FILE = (
+    PROCESSED_DIR / "resource_popularity.parquet"
+)
+
 
 # ============================================================
-# POIDS DU MODÈLE
+# POIDS DU MODELE
 # ============================================================
 
-COLLAB_WEIGHT = 0.60
+COLLABORATIVE_WEIGHT = 0.60
 POPULARITY_WEIGHT = 0.25
 CONTEXT_WEIGHT = 0.15
 
 
 # ============================================================
-# CHARGEMENT DES DONNÉES
+# CHARGEMENT DES DONNEES
 # ============================================================
 
 def load_data():
@@ -62,51 +72,54 @@ def load_data():
         INTERACTIONS_FILE
     )
 
+    resources = pd.read_parquet(
+        RESOURCES_FILE
+    )
+
     neighbors = pd.read_parquet(
         NEIGHBORS_FILE
     )
 
-    return interactions, neighbors
+    popularity = pd.read_parquet(
+        POPULARITY_FILE
+    )
+
+    return (
+        interactions,
+        resources,
+        neighbors,
+        popularity
+    )
 
 
 # ============================================================
-# RECOMMANDATION COLLABORATIVE
+# SCORE COLLABORATIF
 # ============================================================
 
-def collaborative_recommendations(
+def collaborative_scores(
     user,
     interactions,
     neighbors
 ):
     """
-    Génère les recommandations à partir des utilisateurs
-    similaires.
+    Calcule le score collaboratif.
 
-    Le fichier neighbors contient :
+    Principe :
 
-        user
-        similar_user
-        similarity
+    Les utilisateurs similaires à l'utilisateur cible
+    servent à identifier les ressources intéressantes.
+
+    Plus un voisin est similaire, plus son interaction
+    avec une ressource contribue au score.
     """
 
     # --------------------------------------------------------
-    # Ressources déjà utilisées
-    # --------------------------------------------------------
-
-    user_resources = set(
-        interactions.loc[
-            interactions["users"] == user,
-            "resource"
-        ]
-    )
-
-    # --------------------------------------------------------
-    # Utilisateurs similaires
+    # Voisins de l'utilisateur
     # --------------------------------------------------------
 
     user_neighbors = neighbors[
         neighbors["user"] == user
-    ]
+    ].copy()
 
     if user_neighbors.empty:
 
@@ -118,47 +131,23 @@ def collaborative_recommendations(
             ]
         )
 
-    scores = {}
-
     # --------------------------------------------------------
-    # Parcours des utilisateurs similaires
+    # Jointure avec les interactions
     # --------------------------------------------------------
 
-    for _, neighbor in user_neighbors.iterrows():
+    neighbor_interactions = interactions.merge(
+        user_neighbors[
+            [
+                "similar_user",
+                "similarity"
+            ]
+        ],
+        left_on="user",
+        right_on="similar_user",
+        how="inner"
+    )
 
-        similar_user = neighbor["similar_user"]
-
-        similarity = float(
-            neighbor["similarity"]
-        )
-
-        # Ressources du voisin
-        similar_resources = interactions.loc[
-            interactions["users"] == similar_user,
-            "resource"
-        ]
-
-        # ----------------------------------------------------
-        # Pondération par similarité
-        # ----------------------------------------------------
-
-        for resource in similar_resources:
-
-            # Ne jamais recommander une ressource
-            # déjà utilisée
-            if resource in user_resources:
-                continue
-
-            scores[resource] = (
-                scores.get(resource, 0.0)
-                + similarity
-            )
-
-    # --------------------------------------------------------
-    # Aucun résultat
-    # --------------------------------------------------------
-
-    if not scores:
+    if neighbor_interactions.empty:
 
         return pd.DataFrame(
             columns=[
@@ -169,134 +158,224 @@ def collaborative_recommendations(
         )
 
     # --------------------------------------------------------
-    # Conversion en DataFrame
+    # Score collaboratif
     # --------------------------------------------------------
 
-    result = pd.DataFrame(
-        list(scores.items()),
-        columns=[
-            "resource",
-            "collaborative_score"
-        ]
+    scores = (
+        neighbor_interactions
+        .groupby("resource")
+        .agg(
+            collaborative_score=(
+                "similarity",
+                "sum"
+            ),
+            support_users=(
+                "similar_user",
+                "nunique"
+            )
+        )
+        .reset_index()
     )
 
-    # --------------------------------------------------------
     # Normalisation
-    # --------------------------------------------------------
-
-    max_score = result[
+    max_score = scores[
         "collaborative_score"
     ].max()
 
     if max_score > 0:
 
-        result["collaborative_score"] = (
-            result["collaborative_score"]
-            / max_score
-        )
+        scores[
+            "collaborative_score"
+        ] /= max_score
 
-    # --------------------------------------------------------
-    # Support utilisateur
-    # --------------------------------------------------------
-
-    support = (
-        interactions
-        .groupby("resource")["users"]
-        .nunique()
-        .reset_index(
-            name="support_users"
-        )
-    )
-
-    result = result.merge(
-        support,
-        on="resource",
-        how="left"
-    )
-
-    return result
+    return scores
 
 
 # ============================================================
-# RECOMMANDATION HYBRIDE
+# SCORE DE POPULARITE
+# ============================================================
+
+def popularity_scores(
+    popularity
+):
+
+    scores = popularity[
+        [
+            "resource",
+            "popularity_score",
+            "support_users"
+        ]
+    ].copy()
+
+    return scores
+
+
+# ============================================================
+# SCORE CONTEXTUEL
+# ============================================================
+
+def calculate_context_scores(
+    user,
+    interactions,
+    resources
+):
+    """
+    Calcule la proximité contextuelle.
+
+    On regarde les ressources déjà utilisées par l'utilisateur
+    puis on mesure combien de leurs caractéristiques sont
+    partagées avec une ressource candidate.
+
+    Caractéristiques :
+
+        site
+        sous-site
+        bibliothèque
+        liste
+    """
+
+    # --------------------------------------------------------
+    # Ressources déjà utilisées
+    # --------------------------------------------------------
+
+    user_resources = interactions[
+        interactions["user"] == user
+    ]["resource"].tolist()
+
+    if not user_resources:
+
+        return pd.DataFrame(
+            columns=[
+                "resource",
+                "context_score"
+            ]
+        )
+
+    used_resources = resources[
+        resources["resource"].isin(
+            user_resources
+        )
+    ]
+
+    if used_resources.empty:
+
+        return pd.DataFrame(
+            columns=[
+                "resource",
+                "context_score"
+            ]
+        )
+
+    # --------------------------------------------------------
+    # Valeurs de contexte utilisées par l'utilisateur
+    # --------------------------------------------------------
+
+    user_sites = set(
+        used_resources["site"]
+    )
+
+    user_subsites = set(
+        used_resources["sous-site"]
+    )
+
+    user_libraries = set(
+        used_resources["bibliothèque"]
+    )
+
+    user_lists = set(
+        used_resources["liste"]
+    )
+
+    # --------------------------------------------------------
+    # Calcul pour chaque ressource
+    # --------------------------------------------------------
+
+    results = []
+
+    for _, row in resources.iterrows():
+
+        score = 0.0
+
+        if row["site"] in user_sites:
+            score += 0.40
+
+        if row["sous-site"] in user_subsites:
+            score += 0.30
+
+        if row["bibliothèque"] in user_libraries:
+            score += 0.20
+
+        if row["liste"] in user_lists:
+            score += 0.10
+
+        results.append(
+            {
+                "resource": row["resource"],
+                "context_score": score
+            }
+        )
+
+    return pd.DataFrame(results)
+
+
+# ============================================================
+# RECOMMANDATION
 # ============================================================
 
 def recommend(
     user,
+    interactions,
+    resources,
+    neighbors,
+    popularity,
     top_n=10
 ):
-    """
-    Génère les recommandations hybrides.
-    """
 
-    interactions, neighbors = load_data()
+    # ========================================================
+    # Ressources déjà utilisées
+    # ========================================================
 
-    # --------------------------------------------------------
-    # Vérification utilisateur
-    # --------------------------------------------------------
-
-    if user not in interactions["users"].values:
-
-        raise ValueError(
-            f"Utilisateur inconnu : {user}"
-        )
-
-    # --------------------------------------------------------
-    # Liste des ressources
-    # --------------------------------------------------------
-
-    resources = (
+    used_resources = set(
         interactions[
-            [
-                "resource",
-                "site",
-                "sous-site",
-                "bibliothèque",
-                "liste"
-            ]
-        ]
-        .drop_duplicates(
-            subset=["resource"]
-        )
+            interactions["user"] == user
+        ]["resource"]
     )
 
-    # --------------------------------------------------------
-    # SCORE COLLABORATIF
-    # --------------------------------------------------------
+    # ========================================================
+    # Score collaboratif
+    # ========================================================
 
-    collaborative = (
-        collaborative_recommendations(
-            user,
-            interactions,
-            neighbors
-        )
+    collaborative = collaborative_scores(
+        user,
+        interactions,
+        neighbors
     )
 
-    # --------------------------------------------------------
-    # Si aucun résultat collaboratif
-    # --------------------------------------------------------
+    # ========================================================
+    # Score popularité
+    # ========================================================
 
-    if collaborative.empty:
-
-        return popularity_fallback(
-            user,
-            interactions,
-            top_n
-        )
-
-    # --------------------------------------------------------
-    # SCORE POPULARITÉ
-    # --------------------------------------------------------
-
-    popularity = calculate_popularity(
-        interactions
+    popular = popularity_scores(
+        popularity
     )
 
-    # --------------------------------------------------------
-    # Fusion collaborative + ressources
-    # --------------------------------------------------------
+    # ========================================================
+    # Score contexte
+    # ========================================================
 
-    result = resources.merge(
+    context = calculate_context_scores(
+        user,
+        interactions,
+        resources
+    )
+
+    # ========================================================
+    # Fusion des scores
+    # ========================================================
+
+    recommendations = resources.copy()
+
+    recommendations = recommendations.merge(
         collaborative[
             [
                 "resource",
@@ -305,15 +384,11 @@ def recommend(
             ]
         ],
         on="resource",
-        how="inner"
+        how="left"
     )
 
-    # --------------------------------------------------------
-    # Popularité
-    # --------------------------------------------------------
-
-    result = result.merge(
-        popularity[
+    recommendations = recommendations.merge(
+        popular[
             [
                 "resource",
                 "popularity_score"
@@ -323,166 +398,144 @@ def recommend(
         how="left"
     )
 
-    # --------------------------------------------------------
-    # SCORE CONTEXTUEL
-    # --------------------------------------------------------
-
-    result["context_score"] = result.apply(
-        lambda row:
-        calculate_context_score(
-            user,
-            row,
-            interactions
-        ),
-        axis=1
-    )
-
-    # --------------------------------------------------------
-    # Valeurs manquantes
-    # --------------------------------------------------------
-
-    result[
-        [
-            "collaborative_score",
-            "popularity_score",
-            "context_score"
-        ]
-    ] = result[
-        [
-            "collaborative_score",
-            "popularity_score",
-            "context_score"
-        ]
-    ].fillna(0)
-
-    # --------------------------------------------------------
-    # SCORE FINAL
-    # --------------------------------------------------------
-
-    result["final_score"] = (
-
-        COLLAB_WEIGHT
-        * result["collaborative_score"]
-
-        +
-
-        POPULARITY_WEIGHT
-        * result["popularity_score"]
-
-        +
-
-        CONTEXT_WEIGHT
-        * result["context_score"]
-    )
-
-    # --------------------------------------------------------
-    # POURCENTAGE
-    # --------------------------------------------------------
-
-    result["score_percent"] = (
-        result["final_score"] * 100
-    ).round(2)
-
-    # --------------------------------------------------------
-    # TYPE
-    # --------------------------------------------------------
-
-    result["recommendation_type"] = "Hybride"
-
-    # --------------------------------------------------------
-    # TRI
-    # --------------------------------------------------------
-
-    result = result.sort_values(
-        "final_score",
-        ascending=False
-    )
-
-    return result.head(top_n)
-
-
-# ============================================================
-# FALLBACK POPULARITÉ
-# ============================================================
-
-def popularity_fallback(
-    user,
-    interactions,
-    top_n=10
-):
-    """
-    Fallback utilisé lorsqu'aucune recommandation
-    collaborative n'est disponible.
-
-    On recommande alors les ressources les plus populaires
-    que l'utilisateur n'utilise pas encore.
-    """
-
-    # Ressources déjà utilisées
-    user_resources = set(
-        interactions.loc[
-            interactions["users"] == user,
-            "resource"
-        ]
-    )
-
-    # Popularité
-    popularity = calculate_popularity(
-        interactions
-    )
-
-    # Ressources
-    resources = (
-        interactions[
-            [
-                "resource",
-                "site",
-                "sous-site",
-                "bibliothèque",
-                "liste"
-            ]
-        ]
-        .drop_duplicates("resource")
-    )
-
-    # Fusion
-    result = resources.merge(
-        popularity,
+    recommendations = recommendations.merge(
+        context,
         on="resource",
         how="left"
     )
 
-    # Exclusion
-    result = result[
-        ~result["resource"].isin(
-            user_resources
-        )
+    # ========================================================
+    # Valeurs manquantes
+    # ========================================================
+
+    recommendations[
+        "collaborative_score"
+    ] = recommendations[
+        "collaborative_score"
+    ].fillna(0)
+
+    recommendations[
+        "popularity_score"
+    ] = recommendations[
+        "popularity_score"
+    ].fillna(0)
+
+    recommendations[
+        "context_score"
+    ] = recommendations[
+        "context_score"
+    ].fillna(0)
+
+    recommendations[
+        "support_users"
+    ] = recommendations[
+        "support_users"
+    ].fillna(0)
+
+    # ========================================================
+    # SCORE FINAL
+    # ========================================================
+
+    recommendations[
+        "score"
+    ] = (
+
+        COLLABORATIVE_WEIGHT
+        * recommendations[
+            "collaborative_score"
+        ]
+
+        +
+
+        POPULARITY_WEIGHT
+        * recommendations[
+            "popularity_score"
+        ]
+
+        +
+
+        CONTEXT_WEIGHT
+        * recommendations[
+            "context_score"
+        ]
+    )
+
+    # ========================================================
+    # EXCLUSION DES RESSOURCES DEJA UTILISEES
+    # ========================================================
+
+    recommendations = recommendations[
+        ~recommendations[
+            "resource"
+        ].isin(used_resources)
     ]
 
-    # Score
-    result["final_score"] = (
-        result["popularity_score"]
-    )
+    # ========================================================
+    # TRI
+    # ========================================================
 
-    result["score_percent"] = (
-        result["final_score"] * 100
-    ).round(2)
-
-    result["collaborative_score"] = 0.0
-    result["context_score"] = 0.0
-
-    result["recommendation_type"] = (
-        "Popularité"
-    )
-
-    return (
-        result
+    recommendations = (
+        recommendations
         .sort_values(
-            "final_score",
+            "score",
             ascending=False
         )
         .head(top_n)
+        .copy()
     )
+
+    # ========================================================
+    # POURCENTAGE
+    # ========================================================
+
+    recommendations[
+        "score_percent"
+    ] = (
+        recommendations["score"]
+        * 100
+    ).round(2)
+
+    # ========================================================
+    # TYPE DE RECOMMANDATION
+    # ========================================================
+
+    def recommendation_type(row):
+
+        if row["collaborative_score"] > 0:
+
+            return "Collaborative + contexte"
+
+        if row["context_score"] > 0:
+
+            return "Contexte"
+
+        return "Popularité"
+
+    recommendations[
+        "recommendation_type"
+    ] = recommendations.apply(
+        recommendation_type,
+        axis=1
+    )
+
+    # ========================================================
+    # COLONNES FINALES
+    # ========================================================
+
+    columns = [
+        "resource",
+        "site",
+        "sous-site",
+        "bibliothèque",
+        "liste",
+        "score_percent",
+        "support_users",
+        "recommendation_type"
+    ]
+
+    return recommendations[
+        columns
+    ]
 
 
 # ============================================================
@@ -491,49 +544,93 @@ def popularity_fallback(
 
 if __name__ == "__main__":
 
+    print()
     print("=" * 70)
     print("SHAREPOINT RECOMMENDER V3")
     print("=" * 70)
 
+    # --------------------------------------------------------
+    # Chargement
+    # --------------------------------------------------------
+
+    (
+        interactions,
+        resources,
+        neighbors,
+        popularity
+    ) = load_data()
+
+    # --------------------------------------------------------
+    # Utilisateur
+    # --------------------------------------------------------
+
     user = input(
         "\nUtilisateur : "
-    ).strip()
+    ).strip().lower()
 
-    try:
+    # --------------------------------------------------------
+    # Vérification
+    # --------------------------------------------------------
 
-        recommendations = recommend(
-            user,
-            top_n=10
-        )
+    available_users = set(
+        interactions["user"]
+    )
 
-        print("\n" + "=" * 70)
-        print(
-            f"RECOMMANDATIONS POUR : {user}"
-        )
-        print("=" * 70)
+    if user not in available_users:
 
         print(
-            recommendations[
-                [
-                    "resource",
-                    "site",
-                    "sous-site",
-                    "bibliothèque",
-                    "liste",
-                    "collaborative_score",
-                    "popularity_score",
-                    "context_score",
-                    "score_percent",
-                    "support_users",
-                    "recommendation_type"
-                ]
-            ].to_string(
+            f"\nUtilisateur '{user}' introuvable."
+        )
+
+        print(
+            "\nExemples :"
+        )
+
+        print(
+            ", ".join(
+                sorted(
+                    available_users
+                )[:20]
+            )
+        )
+
+        raise SystemExit
+
+    # --------------------------------------------------------
+    # Recommandations
+    # --------------------------------------------------------
+
+    recommendations = recommend(
+        user=user,
+        interactions=interactions,
+        resources=resources,
+        neighbors=neighbors,
+        popularity=popularity,
+        top_n=10
+    )
+
+    # --------------------------------------------------------
+    # Affichage
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("RECOMMANDATIONS")
+    print("=" * 70)
+
+    if recommendations.empty:
+
+        print(
+            "\nAucune recommandation disponible."
+        )
+
+    else:
+
+        print(
+            recommendations.to_string(
                 index=False
             )
         )
 
-    except Exception as e:
-
-        print(
-            f"\nErreur : {e}"
-        )
+    print()
+    print("=" * 70)
