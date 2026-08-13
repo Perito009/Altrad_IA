@@ -1,140 +1,71 @@
 """
 ===============================================================================
                     SHAREPOINT RECOMMENDER
-                       PREPROCESSING PIPELINE
+                       PREPROCESSING ML
 ===============================================================================
 
-Objectif
---------
-Préparer le dataset SharePoint afin de construire un système de
-recommandation basé sur les interactions utilisateurs / ressources.
+Ce fichier intervient APRES le nettoyage ETL.
 
-Dataset source
---------------
-Data/Cleaned_BD_Sharepoint.csv
+Le nettoyage est déjà réalisé par :
 
-Colonnes attendues dans le CSV
-------------------------------
-Site
-Sous-Site
-Liste
-Bibliothèque
-Users
+    1. ETL.py
+    2. refactorCSV.py
 
-Colonnes utilisées après normalisation
---------------------------------------
-site
-sous-site
-liste
-bibliothèque
-users
+Ce module prépare uniquement les données pour le Machine Learning.
 
-Sorties
--------
-processed/clean_data.parquet
-processed/user_resource.parquet
+Pipeline :
 
-Matrice utilisateur × ressource
---------------------------------
-Les lignes représentent les utilisateurs.
-
-Les colonnes représentent les ressources SharePoint.
-
-Une valeur de 1 signifie :
-
-    l'utilisateur a utilisé / possède / consulte cette ressource.
-
-Une valeur de 0 signifie :
-
-    aucune interaction connue.
-
-Cette matrice sera ensuite utilisée par similarity.py pour calculer
-la similarité entre utilisateurs.
+    BD_Sharepoint_Clean.csv
+            |
+            v
+    Validation des colonnes
+            |
+            v
+    Suppression des utilisateurs invalides
+            |
+            v
+    Création d'une ressource SharePoint
+            |
+            v
+    Suppression des doublons
+            |
+            v
+    Création des interactions
+            |
+            v
+    Données prêtes pour le recommender
 
 ===============================================================================
 """
 
-
-# =============================================================================
-# IMPORTS
-# =============================================================================
-
 from pathlib import Path
-import logging
 
 import pandas as pd
-import numpy as np
 
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-# -------------------------------------------------------------------------
-# Répertoire racine du projet
-# -------------------------------------------------------------------------
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-
-# -------------------------------------------------------------------------
-# Fichier CSV source
-# -------------------------------------------------------------------------
-
-DATA_PATH = (
-    BASE_DIR
-    / "Data"
-    / "Cleaned_BD_Sharepoint.csv"
+DATA_PATH = Path(
+    "data/BD_Sharepoint_Clean.csv"
 )
 
-
-# -------------------------------------------------------------------------
-# Répertoire de sortie
-# -------------------------------------------------------------------------
-
-PROCESSED_DIR = (
-    BASE_DIR
-    / "processed"
+PROCESSED_PATH = Path(
+    "processed"
 )
 
-
-# -------------------------------------------------------------------------
-# Fichiers générés
-# -------------------------------------------------------------------------
-
-CLEAN_DATA_PATH = (
-    PROCESSED_DIR
-    / "clean_data.parquet"
+PROCESSED_PATH.mkdir(
+    parents=True,
+    exist_ok=True
 )
-
-USER_RESOURCE_PATH = (
-    PROCESSED_DIR
-    / "user_resource.parquet"
-)
-
-
-# =============================================================================
-# LOGGING
-# =============================================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format=(
-        "%(asctime)s - "
-        "%(levelname)s - "
-        "%(message)s"
-    ),
-)
-
-
-logger = logging.getLogger(__name__)
 
 
 # =============================================================================
 # COLONNES ATTENDUES
 # =============================================================================
 
-REQUIRED_COLUMNS = [
+EXPECTED_COLUMNS = [
     "site",
     "sous-site",
     "liste",
@@ -144,692 +75,366 @@ REQUIRED_COLUMNS = [
 
 
 # =============================================================================
-# CHARGEMENT DU DATASET
+# UTILISATEURS INVALIDES
 # =============================================================================
 
-def load_dataset():
+INVALID_USERS = {
+    "aucun",
+    "pas de droit",
+    "inconnu",
+    "",
+    "nan",
+    "none",
+}
+
+
+# =============================================================================
+# CHARGEMENT
+# =============================================================================
+
+def load_data():
     """
-    Charge le fichier CSV SharePoint.
+    Charge le CSV déjà nettoyé.
 
-    Le CSV fourni utilise une virgule comme séparateur.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Dataset brut.
+    Aucun nettoyage métier n'est réalisé ici.
     """
-
-    logger.info(
-        "Chargement du dataset SharePoint."
-    )
-
-    logger.info(
-        f"Fichier source : {DATA_PATH}"
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Vérification de l'existence du fichier
-    # -------------------------------------------------------------------------
 
     if not DATA_PATH.exists():
 
         raise FileNotFoundError(
-            f"\n"
-            f"Fichier CSV introuvable :\n"
-            f"{DATA_PATH}\n\n"
-            f"Vérifie que le fichier existe dans :\n"
-            f"Data/Cleaned_BD_Sharepoint.csv"
+            f"""
+Fichier introuvable :
+
+    {DATA_PATH}
+
+Place BD_Sharepoint_Clean.csv dans :
+
+    data/
+"""
         )
 
-
-    # -------------------------------------------------------------------------
-    # Lecture du CSV
-    # -------------------------------------------------------------------------
-
-    try:
-
-        df = pd.read_csv(
-            DATA_PATH,
-            sep=",",
-            encoding="utf-8-sig",
-        )
-
-    except UnicodeDecodeError:
-
-        logger.warning(
-            "UTF-8 non disponible. "
-            "Nouvelle tentative avec latin-1."
-        )
-
-        df = pd.read_csv(
-            DATA_PATH,
-            sep=",",
-            encoding="latin-1",
-        )
-
-
-    logger.info(
-        f"Dataset chargé : "
-        f"{df.shape[0]} lignes, "
-        f"{df.shape[1]} colonnes."
+    df = pd.read_csv(
+        DATA_PATH,
+        encoding="utf-8"
     )
 
+    print(
+        f"CSV chargé : {len(df):,} lignes"
+    )
 
     return df
 
 
 # =============================================================================
-# NORMALISATION DES COLONNES
+# VALIDATION
 # =============================================================================
 
-def normalize_column_names(df):
-    """
-    Normalise les noms de colonnes.
-
-    Exemple :
-
-        'Site'              -> 'site'
-        'Sous-Site'         -> 'sous-site'
-        'Bibliothèque '     -> 'bibliothèque'
-        'Users'             -> 'users'
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Dataset source.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Dataset avec colonnes normalisées.
-    """
-
-    logger.info(
-        "Normalisation des noms de colonnes."
-    )
-
-
-    # Suppression des espaces autour des noms.
-    df.columns = (
-        df.columns
-        .astype(str)
-        .str.strip()
-    )
-
-
-    # Conversion en minuscules.
-    df.columns = (
-        df.columns
-        .str.lower()
-    )
-
-
-    logger.info(
-        f"Colonnes après normalisation : "
-        f"{df.columns.tolist()}"
-    )
-
-
-    return df
-
-
-# =============================================================================
-# VALIDATION DU SCHEMA
-# =============================================================================
-
-def validate_schema(df):
+def validate_data(df):
     """
     Vérifie que toutes les colonnes nécessaires
     sont présentes.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Dataset à vérifier.
-
-    Raises
-    ------
-    ValueError
-        Si des colonnes sont absentes.
     """
-
-    logger.info(
-        "Validation du schéma du dataset."
-    )
-
 
     missing_columns = [
         column
-        for column in REQUIRED_COLUMNS
+        for column in EXPECTED_COLUMNS
         if column not in df.columns
     ]
-
 
     if missing_columns:
 
         raise ValueError(
             "Colonnes manquantes : "
-            + ", ".join(missing_columns)
-            + "\n\n"
-            + "Colonnes trouvées : "
-            + ", ".join(df.columns.tolist())
+            + ", ".join(
+                missing_columns
+            )
         )
 
-
-    logger.info(
-        "Validation du schéma réussie."
+    print(
+        "✓ Structure du CSV valide"
     )
 
 
 # =============================================================================
-# NETTOYAGE DES VALEURS
+# NORMALISATION MINIMALE
 # =============================================================================
 
-def clean_values(df):
+def normalize_columns(df):
     """
-    Nettoie les valeurs du dataset.
+    Effectue uniquement une normalisation technique.
 
-    Opérations :
+    Le nettoyage métier a déjà été réalisé par l'ETL.
 
-    - suppression des espaces ;
-    - conversion en chaînes ;
-    - conversion des valeurs '0' en valeurs manquantes ;
-    - conversion des chaînes vides en valeurs manquantes ;
-    - suppression des lignes sans utilisateur.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-
-    Returns
-    -------
-    pandas.DataFrame
+    On supprime notamment les espaces inutiles
+    autour des valeurs.
     """
-
-    logger.info(
-        "Nettoyage des valeurs."
-    )
-
 
     df = df.copy()
 
-
-    # -------------------------------------------------------------------------
-    # Nettoyage des colonnes textuelles
-    # -------------------------------------------------------------------------
-
-    for column in REQUIRED_COLUMNS:
-
-        df[column] = (
-            df[column]
-            .astype("string")
-            .str.strip()
-        )
-
-
-    # -------------------------------------------------------------------------
-    # Remplacement des valeurs vides
-    # -------------------------------------------------------------------------
-
-    df = df.replace(
-        {
-            "": pd.NA,
-            "nan": pd.NA,
-            "None": pd.NA,
-            "NULL": pd.NA,
-        }
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Dans ton dataset, 0 représente généralement
-    # une information non renseignée.
-    #
-    # On le transforme uniquement pour les dimensions
-    # SharePoint, pas pour les utilisateurs.
-    # -------------------------------------------------------------------------
-
-    dimension_columns = [
+    columns = [
         "site",
         "sous-site",
         "liste",
         "bibliothèque",
+        "users",
     ]
 
+    for column in columns:
 
-    for column in dimension_columns:
-
-        df[column] = df[column].replace(
-            "0",
-            pd.NA
+        df[column] = (
+            df[column]
+            .fillna("aucun")
+            .astype(str)
+            .str.strip()
         )
-
-
-    # -------------------------------------------------------------------------
-    # Suppression des lignes sans utilisateur
-    # -------------------------------------------------------------------------
-
-    before = len(df)
-
-
-    df = df.dropna(
-        subset=["users"]
-    )
-
-
-    after = len(df)
-
-
-    removed = before - after
-
-
-    if removed > 0:
-
-        logger.info(
-            f"{removed} lignes supprimées "
-            f"car aucun utilisateur n'était renseigné."
-        )
-
-
-    # -------------------------------------------------------------------------
-    # Suppression des doublons exacts
-    # -------------------------------------------------------------------------
-
-    before = len(df)
-
-
-    df = df.drop_duplicates()
-
-
-    after = len(df)
-
-
-    removed = before - after
-
-
-    if removed > 0:
-
-        logger.info(
-            f"{removed} doublons exacts supprimés."
-        )
-
-
-    # -------------------------------------------------------------------------
-    # Réinitialisation de l'index
-    # -------------------------------------------------------------------------
-
-    df = df.reset_index(
-        drop=True
-    )
-
-
-    logger.info(
-        f"Dataset après nettoyage : "
-        f"{len(df)} lignes."
-    )
-
 
     return df
+
+
+# =============================================================================
+# FILTRAGE DES UTILISATEURS
+# =============================================================================
+
+def filter_valid_users(df):
+    """
+    Supprime les lignes qui ne correspondent
+    pas à un véritable utilisateur.
+
+    Exemple :
+
+        users = aucun
+
+    ne doit PAS devenir un utilisateur du modèle.
+
+    En revanche :
+
+        liste = aucun
+
+    ou :
+
+        bibliothèque = aucun
+
+    restent parfaitement valides.
+    """
+
+    normalized_users = (
+        df["users"]
+        .str.lower()
+        .str.strip()
+    )
+
+    mask = ~normalized_users.isin(
+        INVALID_USERS
+    )
+
+    filtered_df = df[
+        mask
+    ].copy()
+
+    removed = len(df) - len(
+        filtered_df
+    )
+
+    print(
+        f"✓ Utilisateurs invalides supprimés : "
+        f"{removed:,}"
+    )
+
+    return filtered_df
 
 
 # =============================================================================
 # CREATION DE LA RESSOURCE
 # =============================================================================
 
-def create_resource_column(df):
+def create_resource(df):
     """
-    Crée un identifiant unique pour chaque ressource SharePoint.
+    Crée un identifiant unique représentant
+    une ressource SharePoint.
 
     Une ressource est définie par :
 
         Site
-        +
         Sous-site
-        +
-        Liste
-        +
         Bibliothèque
+        Liste
 
     Exemple :
 
-        Altrad S fr : Home
-        |
-        Altrad S fr : Home
-        |
-        BDD-RH Personnels
-        |
-        Document de la collection de sites
+        Altrad Services France
+        Cash
+        aucun
+        aucun
 
     devient :
 
-        Altrad S fr : Home |
-        Altrad S fr : Home |
-        BDD-RH Personnels |
-        Document de la collection de sites
-
-    Cette colonne est utilisée comme identifiant de ressource
-    dans le système de recommandation.
+        Altrad Services France |
+        Cash |
+        aucun |
+        aucun
     """
 
-    logger.info(
-        "Création des identifiants de ressources."
-    )
-
-
     df = df.copy()
-
-
-    # -------------------------------------------------------------------------
-    # Remplacement temporaire des valeurs manquantes
-    # -------------------------------------------------------------------------
-
-    resource_columns = [
-        "site",
-        "sous-site",
-        "liste",
-        "bibliothèque",
-    ]
-
-
-    for column in resource_columns:
-
-        df[column] = (
-            df[column]
-            .fillna("Non renseigné")
-        )
-
-
-    # -------------------------------------------------------------------------
-    # Création de l'identifiant ressource
-    # -------------------------------------------------------------------------
 
     df["resource"] = (
         df["site"]
         + " | "
         + df["sous-site"]
         + " | "
-        + df["liste"]
-        + " | "
         + df["bibliothèque"]
+        + " | "
+        + df["liste"]
     )
-
-
-    # -------------------------------------------------------------------------
-    # Nettoyage final de l'identifiant
-    # -------------------------------------------------------------------------
-
-    df["resource"] = (
-        df["resource"]
-        .str.strip()
-    )
-
-
-    logger.info(
-        f"Nombre de ressources uniques : "
-        f"{df['resource'].nunique()}"
-    )
-
 
     return df
 
 
 # =============================================================================
-# CREATION DE LA MATRICE UTILISATEUR × RESSOURCE
+# SUPPRESSION DES DOUBLONS
 # =============================================================================
 
-def create_user_resource_matrix(df):
+def remove_duplicates(df):
     """
-    Construit la matrice utilisateur × ressource.
+    Supprime les doublons utilisateur / ressource.
 
-    Exemple :
+    Si :
 
-    +-----------+-----------+-----------+-----------+
-    | users     | Resource A| Resource B| Resource C|
-    +-----------+-----------+-----------+-----------+
-    | Yann      |     1     |     0     |     1     |
-    | Marie     |     0     |     1     |     1     |
-    | Paul      |     1     |     1     |     0     |
-    +-----------+-----------+-----------+-----------+
+        adam -> Cash
 
-    1 = interaction connue
-    0 = aucune interaction connue
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-
-    Returns
-    -------
-    pandas.DataFrame
+    apparaît plusieurs fois, le modèle considère
+    qu'il s'agit d'une seule interaction.
     """
 
-    logger.info(
-        "Construction de la matrice "
-        "utilisateur × ressource."
+    before = len(df)
+
+    df = df.drop_duplicates(
+        subset=[
+            "users",
+            "resource",
+        ]
+    ).copy()
+
+    removed = before - len(df)
+
+    print(
+        f"✓ Doublons utilisateur/ressource supprimés : "
+        f"{removed:,}"
     )
 
-
-    # -------------------------------------------------------------------------
-    # Pivot
-    # -------------------------------------------------------------------------
-
-    matrix = pd.crosstab(
-        df["users"],
-        df["resource"],
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Transformation en binaire
-    #
-    # Si un utilisateur apparaît plusieurs fois
-    # pour la même ressource, on garde simplement 1.
-    # -------------------------------------------------------------------------
-
-    matrix = (
-        matrix
-        .clip(upper=1)
-        .astype("int8")
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Tri
-    # -------------------------------------------------------------------------
-
-    matrix = matrix.sort_index()
-
-    matrix = matrix.sort_index(
-        axis=1
-    )
-
-
-    logger.info(
-        "Matrice utilisateur × ressource créée."
-    )
-
-
-    logger.info(
-        f"Nombre d'utilisateurs : "
-        f"{matrix.shape[0]}"
-    )
-
-
-    logger.info(
-        f"Nombre de ressources : "
-        f"{matrix.shape[1]}"
-    )
-
-
-    logger.info(
-        f"Taille de la matrice : "
-        f"{matrix.shape[0]} × {matrix.shape[1]}"
-    )
-
-
-    return matrix
+    return df
 
 
 # =============================================================================
-# STATISTIQUES DU DATASET
+# CREATION DES INTERACTIONS
 # =============================================================================
 
-def generate_statistics(
+def create_interactions(df):
+    """
+    Conserve uniquement les informations
+    nécessaires au système de recommandation.
+
+    Une interaction signifie :
+
+        utilisateur X
+        utilise / possède
+        ressource Y
+    """
+
+    interactions = df[
+        [
+            "users",
+            "resource",
+        ]
+    ].copy()
+
+    interactions = interactions.rename(
+        columns={
+            "users": "user"
+        }
+    )
+
+    return interactions
+
+
+# =============================================================================
+# STATISTIQUES
+# =============================================================================
+
+def create_statistics(
     df,
-    user_resource_matrix,
+    interactions
 ):
     """
-    Affiche quelques statistiques utiles
-    sur le dataset préparé.
+    Calcule les statistiques principales
+    du dataset préparé.
     """
 
-    logger.info(
-        "Calcul des statistiques."
-    )
+    statistics = {
+        "rows_original": len(df),
 
+        "users": interactions[
+            "user"
+        ].nunique(),
 
-    number_rows = len(df)
+        "resources": interactions[
+            "resource"
+        ].nunique(),
 
-    number_users = (
-        df["users"]
-        .nunique()
-    )
+        "interactions": len(
+            interactions
+        ),
 
-    number_resources = (
-        df["resource"]
-        .nunique()
-    )
+        "sites": df[
+            "site"
+        ].nunique(),
 
+        "subsites": df[
+            "sous-site"
+        ].nunique(),
 
-    # -------------------------------------------------------------------------
-    # Densité de la matrice
-    # -------------------------------------------------------------------------
+        "libraries": df[
+            "bibliothèque"
+        ].nunique(),
 
-    total_possible_interactions = (
-        user_resource_matrix.shape[0]
-        * user_resource_matrix.shape[1]
-    )
+        "lists": df[
+            "liste"
+        ].nunique(),
+    }
 
-
-    total_interactions = (
-        user_resource_matrix
-        .to_numpy()
-        .sum()
-    )
-
-
-    if total_possible_interactions > 0:
-
-        density = (
-            total_interactions
-            / total_possible_interactions
-        )
-
-    else:
-
-        density = 0
-
-
-    logger.info(
-        "======================================================================"
-    )
-
-    logger.info(
-        "STATISTIQUES DU DATASET"
-    )
-
-    logger.info(
-        "======================================================================"
-    )
-
-    logger.info(
-        f"Nombre de lignes              : {number_rows}"
-    )
-
-    logger.info(
-        f"Nombre d'utilisateurs         : {number_users}"
-    )
-
-    logger.info(
-        f"Nombre de ressources          : {number_resources}"
-    )
-
-    logger.info(
-        f"Nombre d'interactions        : {int(total_interactions)}"
-    )
-
-    logger.info(
-        f"Densité de la matrice         : "
-        f"{density:.6f}"
-    )
-
-    logger.info(
-        "======================================================================"
-    )
+    return statistics
 
 
 # =============================================================================
 # SAUVEGARDE
 # =============================================================================
 
-def save_processed_data(
+def save_data(
     df,
-    user_resource_matrix,
+    interactions
 ):
     """
-    Sauvegarde les données préparées au format Parquet.
+    Sauvegarde les données préparées.
 
-    Fichiers :
-
-        processed/clean_data.parquet
-
-        processed/user_resource.parquet
+    Parquet est utilisé car il est plus efficace
+    que CSV pour les traitements ML.
     """
 
-    logger.info(
-        "Sauvegarde des données préparées."
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Création du dossier processed
-    # -------------------------------------------------------------------------
-
-    PROCESSED_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Sauvegarde du dataset nettoyé
-    # -------------------------------------------------------------------------
-
+    # Dataset complet préparé.
     df.to_parquet(
-        CLEAN_DATA_PATH,
+        PROCESSED_PATH
+        / "clean_data.parquet",
         index=False
     )
 
-
-    logger.info(
-        f"Dataset nettoyé sauvegardé : "
-        f"{CLEAN_DATA_PATH}"
+    # Interactions utilisateur/ressource.
+    interactions.to_parquet(
+        PROCESSED_PATH
+        / "interactions.parquet",
+        index=False
     )
 
-
-    # -------------------------------------------------------------------------
-    # Sauvegarde de la matrice
-    # -------------------------------------------------------------------------
-
-    user_resource_matrix.to_parquet(
-        USER_RESOURCE_PATH
-    )
-
-
-    logger.info(
-        f"Matrice utilisateur × ressource sauvegardée : "
-        f"{USER_RESOURCE_PATH}"
+    print(
+        "✓ Données sauvegardées dans processed/"
     )
 
 
@@ -838,134 +443,134 @@ def save_processed_data(
 # =============================================================================
 
 def run_preprocessing():
-    """
-    Exécute l'intégralité du pipeline de preprocessing.
 
-    Étapes :
-
-        1. Chargement
-        2. Normalisation des colonnes
-        3. Validation
-        4. Nettoyage
-        5. Création des ressources
-        6. Création de la matrice utilisateur × ressource
-        7. Statistiques
-        8. Sauvegarde
-
-    Returns
-    -------
-    dict
-        Résultats du preprocessing.
-    """
-
-    logger.info(
-        "======================================================================"
+    print()
+    print("=" * 70)
+    print(
+        "SHAREPOINT RECOMMENDER - PREPROCESSING"
     )
+    print("=" * 70)
 
-    logger.info(
-        "DÉMARRAGE DU PIPELINE SHAREPOINT"
-    )
+    # -------------------------------------------------------------------------
+    # 1. Chargement
+    # -------------------------------------------------------------------------
 
-    logger.info(
-        "======================================================================"
-    )
+    df = load_data()
 
+    # -------------------------------------------------------------------------
+    # 2. Validation
+    # -------------------------------------------------------------------------
 
-    # =========================================================================
-    # 1. CHARGEMENT
-    # =========================================================================
-
-    df = load_dataset()
-
-
-    # =========================================================================
-    # 2. NORMALISATION DES COLONNES
-    # =========================================================================
-
-    df = normalize_column_names(
+    validate_data(
         df
     )
 
+    # -------------------------------------------------------------------------
+    # 3. Normalisation technique
+    # -------------------------------------------------------------------------
 
-    # =========================================================================
-    # 3. VALIDATION DU SCHEMA
-    # =========================================================================
-
-    validate_schema(
+    df = normalize_columns(
         df
     )
 
+    # -------------------------------------------------------------------------
+    # 4. Suppression des faux utilisateurs
+    # -------------------------------------------------------------------------
 
-    # =========================================================================
-    # 4. NETTOYAGE
-    # =========================================================================
-
-    df = clean_values(
+    df = filter_valid_users(
         df
     )
 
+    # -------------------------------------------------------------------------
+    # 5. Création de la ressource
+    # -------------------------------------------------------------------------
 
-    # =========================================================================
-    # 5. CREATION DES RESSOURCES
-    # =========================================================================
-
-    df = create_resource_column(
+    df = create_resource(
         df
     )
 
+    # -------------------------------------------------------------------------
+    # 6. Suppression des doublons
+    # -------------------------------------------------------------------------
 
-    # =========================================================================
-    # 6. MATRICE UTILISATEUR × RESSOURCE
-    # =========================================================================
-
-    user_resource_matrix = (
-        create_user_resource_matrix(
-            df
-        )
+    df = remove_duplicates(
+        df
     )
 
+    # -------------------------------------------------------------------------
+    # 7. Création des interactions
+    # -------------------------------------------------------------------------
 
-    # =========================================================================
-    # 7. STATISTIQUES
-    # =========================================================================
+    interactions = create_interactions(
+        df
+    )
 
-    generate_statistics(
+    # -------------------------------------------------------------------------
+    # 8. Statistiques
+    # -------------------------------------------------------------------------
+
+    statistics = create_statistics(
         df,
-        user_resource_matrix
+        interactions
     )
 
+    # -------------------------------------------------------------------------
+    # 9. Sauvegarde
+    # -------------------------------------------------------------------------
 
-    # =========================================================================
-    # 8. SAUVEGARDE
-    # =========================================================================
-
-    save_processed_data(
+    save_data(
         df,
-        user_resource_matrix
+        interactions
     )
 
+    # -------------------------------------------------------------------------
+    # 10. Résumé
+    # -------------------------------------------------------------------------
 
-    # =========================================================================
-    # FIN
-    # =========================================================================
+    print()
+    print("=" * 70)
+    print("STATISTIQUES")
+    print("=" * 70)
 
-    logger.info(
-        "======================================================================"
+    print(
+        f"Utilisateurs       : "
+        f"{statistics['users']:,}"
     )
 
-    logger.info(
-        "PREPROCESSING TERMINÉ AVEC SUCCÈS"
+    print(
+        f"Ressources         : "
+        f"{statistics['resources']:,}"
     )
 
-    logger.info(
-        "======================================================================"
+    print(
+        f"Interactions       : "
+        f"{statistics['interactions']:,}"
     )
 
+    print(
+        f"Sites              : "
+        f"{statistics['sites']:,}"
+    )
 
-    return {
-        "clean_data": df,
-        "user_resource_matrix": user_resource_matrix,
-    }
+    print(
+        f"Sous-sites         : "
+        f"{statistics['subsites']:,}"
+    )
+
+    print(
+        f"Bibliothèques      : "
+        f"{statistics['libraries']:,}"
+    )
+
+    print(
+        f"Listes             : "
+        f"{statistics['lists']:,}"
+    )
+
+    print()
+    print(
+        "Preprocessing ML terminé."
+    )
 
 
 # =============================================================================
@@ -974,82 +579,4 @@ def run_preprocessing():
 
 if __name__ == "__main__":
 
-    try:
-
-        results = run_preprocessing()
-
-
-        # ---------------------------------------------------------------------
-        # Résumé final dans le terminal
-        # ---------------------------------------------------------------------
-
-        df_clean = results[
-            "clean_data"
-        ]
-
-        matrix = results[
-            "user_resource_matrix"
-        ]
-
-
-        print()
-        print(
-            "============================================================"
-        )
-
-        print(
-            "✅ PREPROCESSING TERMINÉ"
-        )
-
-        print(
-            "============================================================"
-        )
-
-        print(
-            f"📄 Lignes nettoyées      : {len(df_clean):,}"
-        )
-
-        print(
-            f"👥 Utilisateurs          : "
-            f"{matrix.shape[0]:,}"
-        )
-
-        print(
-            f"📚 Ressources            : "
-            f"{matrix.shape[1]:,}"
-        )
-
-        print()
-        print(
-            "📁 Fichiers générés :"
-        )
-
-        print(
-            f"   → {CLEAN_DATA_PATH}"
-        )
-
-        print(
-            f"   → {USER_RESOURCE_PATH}"
-        )
-
-        print(
-            "============================================================"
-        )
-
-
-    except Exception as error:
-
-        logger.exception(
-            "Erreur pendant le preprocessing."
-        )
-
-        print()
-        print(
-            "❌ ERREUR DU PREPROCESSING"
-        )
-
-        print(
-            str(error)
-        )
-
-        raise
+    run_preprocessing()

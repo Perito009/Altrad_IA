@@ -1,1080 +1,539 @@
 """
-===============================================================================
-                    SHAREPOINT RECOMMENDER
-                         RECOMMENDER ENGINE
-===============================================================================
+============================================================
+RECOMMENDER.PY - VERSION 3
+============================================================
 
-Objectif
---------
-Générer des recommandations personnalisées de ressources SharePoint.
+SYSTÈME DE RECOMMANDATION HYBRIDE SHAREPOINT
 
-Principe
---------
-Le système utilise une approche collaborative basée sur les utilisateurs.
+Le moteur combine :
 
-Exemple :
+    1. Similarité entre utilisateurs
+    2. Popularité des ressources
+    3. Contexte SharePoint
 
-Utilisateur A
-    ├── Ressource 1
-    ├── Ressource 2
-    └── Ressource 3
+Score final :
 
-Utilisateur B
-    ├── Ressource 1
-    ├── Ressource 2
-    └── Ressource 4
-
-Utilisateur A et B sont similaires.
-
-On peut donc recommander :
-
-    Ressource 4
-
-à l'utilisateur A.
-
-===============================================================================
+    60 % -> collaboratif
+    25 % -> popularité
+    15 % -> contexte
 """
-
-
-# =============================================================================
-# IMPORTS
-# =============================================================================
 
 from pathlib import Path
 
 import pandas as pd
-import numpy as np
+
+from context import calculate_context_score
+from popularity import calculate_popularity
 
 
-# =============================================================================
+# ============================================================
 # CONFIGURATION
-# =============================================================================
+# ============================================================
 
-BASE_DIR = (
-    Path(__file__)
-    .resolve()
-    .parent
-    .parent
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
+PROCESSED_DIR = PROJECT_DIR / "processed"
+
+INTERACTIONS_FILE = (
+    PROCESSED_DIR / "interactions.parquet"
+)
+
+NEIGHBORS_FILE = (
+    PROCESSED_DIR / "user_neighbors.parquet"
 )
 
 
-PROCESSED_DIR = (
-    BASE_DIR
-    / "processed"
-)
+# ============================================================
+# POIDS DU MODÈLE
+# ============================================================
+
+COLLAB_WEIGHT = 0.60
+POPULARITY_WEIGHT = 0.25
+CONTEXT_WEIGHT = 0.15
 
 
-USER_RESOURCE_PATH = (
-    PROCESSED_DIR
-    / "user_resource.parquet"
-)
-
-
-CLEAN_DATA_PATH = (
-    PROCESSED_DIR
-    / "clean_data.parquet"
-)
-
-
-COSINE_PATH = (
-    PROCESSED_DIR
-    / "cosine_similarity.parquet"
-)
-
-
-JACCARD_PATH = (
-    PROCESSED_DIR
-    / "jaccard_similarity.parquet"
-)
-
-
-KNN_PATH = (
-    PROCESSED_DIR
-    / "knn_neighbors.parquet"
-)
-
-
-# =============================================================================
+# ============================================================
 # CHARGEMENT DES DONNÉES
-# =============================================================================
+# ============================================================
 
-def load_user_resource_matrix():
-    """
-    Charge la matrice utilisateur × ressource.
+def load_data():
 
-    Returns
-    -------
-    pandas.DataFrame
-
-        Index :
-            utilisateurs
-
-        Colonnes :
-            ressources
-
-        Valeurs :
-            0 ou 1
-    """
-
-    if not USER_RESOURCE_PATH.exists():
-
-        raise FileNotFoundError(
-            f"Matrice utilisateur × ressource introuvable : "
-            f"{USER_RESOURCE_PATH}"
-        )
-
-
-    matrix = pd.read_parquet(
-        USER_RESOURCE_PATH
+    interactions = pd.read_parquet(
+        INTERACTIONS_FILE
     )
 
-
-    return matrix
-
-
-# =============================================================================
-# CHARGEMENT DE LA SIMILARITÉ COSINE
-# =============================================================================
-
-def load_cosine_similarity():
-    """
-    Charge la matrice de similarité Cosine.
-
-    Returns
-    -------
-    pandas.DataFrame
-    """
-
-    if not COSINE_PATH.exists():
-
-        raise FileNotFoundError(
-            f"Fichier de similarité Cosine introuvable : "
-            f"{COSINE_PATH}"
-        )
-
-
-    similarity = pd.read_parquet(
-        COSINE_PATH
+    neighbors = pd.read_parquet(
+        NEIGHBORS_FILE
     )
 
-
-    return similarity
-
-
-# =============================================================================
-# CHARGEMENT DE LA SIMILARITÉ JACCARD
-# =============================================================================
-
-def load_jaccard_similarity():
-    """
-    Charge la matrice de similarité Jaccard.
-
-    Returns
-    -------
-    pandas.DataFrame
-    """
-
-    if not JACCARD_PATH.exists():
-
-        raise FileNotFoundError(
-            f"Fichier Jaccard introuvable : "
-            f"{JACCARD_PATH}"
-        )
+    return interactions, neighbors
 
 
-    return pd.read_parquet(
-        JACCARD_PATH
-    )
+# ============================================================
+# RECOMMANDATION COLLABORATIVE
+# ============================================================
 
-
-# =============================================================================
-# CHARGEMENT DES VOISINS KNN
-# =============================================================================
-
-def load_knn_neighbors():
-    """
-    Charge les voisins calculés avec KNN.
-
-    Returns
-    -------
-    pandas.DataFrame
-    """
-
-    if not KNN_PATH.exists():
-
-        raise FileNotFoundError(
-            f"Fichier KNN introuvable : "
-            f"{KNN_PATH}"
-        )
-
-
-    return pd.read_parquet(
-        KNN_PATH
-    )
-
-
-# =============================================================================
-# CHARGEMENT DES DONNÉES PROPRES
-# =============================================================================
-
-def load_clean_data():
-    """
-    Charge le dataset nettoyé.
-
-    Ce dataset permet notamment de récupérer
-    les informations détaillées des ressources.
-    """
-
-    if not CLEAN_DATA_PATH.exists():
-
-        raise FileNotFoundError(
-            f"Dataset nettoyé introuvable : "
-            f"{CLEAN_DATA_PATH}"
-        )
-
-
-    return pd.read_parquet(
-        CLEAN_DATA_PATH
-    )
-
-
-# =============================================================================
-# RESSOURCES D'UN UTILISATEUR
-# =============================================================================
-
-def get_user_resources(
+def collaborative_recommendations(
     user,
-    user_resource_matrix=None
+    interactions,
+    neighbors
 ):
     """
-    Retourne les ressources déjà utilisées par un utilisateur.
+    Génère les recommandations à partir des utilisateurs
+    similaires.
 
-    Parameters
-    ----------
-    user : str
-        Utilisateur.
-
-    user_resource_matrix : DataFrame, optional
-        Matrice utilisateur × ressource.
-
-    Returns
-    -------
-    list
-        Liste des ressources.
-    """
-
-    if user_resource_matrix is None:
-
-        user_resource_matrix = (
-            load_user_resource_matrix()
-        )
-
-
-    if user not in user_resource_matrix.index:
-
-        return []
-
-
-    user_row = (
-        user_resource_matrix
-        .loc[user]
-    )
-
-
-    resources = (
-        user_row[
-            user_row > 0
-        ]
-        .index
-        .tolist()
-    )
-
-
-    return resources
-
-
-# =============================================================================
-# UTILISATEURS SIMILAIRES
-# =============================================================================
-
-def get_similar_users(
-    user,
-    similarity_matrix=None,
-    n=10
-):
-    """
-    Retourne les utilisateurs les plus similaires.
-
-    Parameters
-    ----------
-    user : str
-        Utilisateur cible.
-
-    similarity_matrix : DataFrame
-        Matrice de similarité.
-
-    n : int
-        Nombre de voisins.
-
-    Returns
-    -------
-    pandas.DataFrame
-
-        Colonnes :
+    Le fichier neighbors contient :
 
         user
+        similar_user
         similarity
     """
 
-    if similarity_matrix is None:
+    # --------------------------------------------------------
+    # Ressources déjà utilisées
+    # --------------------------------------------------------
 
-        similarity_matrix = (
-            load_cosine_similarity()
-        )
-
-
-    if user not in similarity_matrix.index:
-
-        return pd.DataFrame(
-            columns=[
-                "user",
-                "similarity"
-            ]
-        )
-
-
-    similarities = (
-        similarity_matrix
-        .loc[user]
-        .copy()
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Suppression de l'utilisateur lui-même
-    # -------------------------------------------------------------------------
-
-    if user in similarities.index:
-
-        similarities = (
-            similarities
-            .drop(user)
-        )
-
-
-    # -------------------------------------------------------------------------
-    # Tri décroissant
-    # -------------------------------------------------------------------------
-
-    similarities = (
-        similarities
-        .sort_values(
-            ascending=False
-        )
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Suppression des similarités nulles
-    # -------------------------------------------------------------------------
-
-    similarities = (
-        similarities[
-            similarities > 0
+    user_resources = set(
+        interactions.loc[
+            interactions["users"] == user,
+            "resource"
         ]
     )
 
+    # --------------------------------------------------------
+    # Utilisateurs similaires
+    # --------------------------------------------------------
 
-    similarities = (
-        similarities
-        .head(n)
-    )
+    user_neighbors = neighbors[
+        neighbors["user"] == user
+    ]
 
-
-    result = pd.DataFrame(
-        {
-            "user": similarities.index,
-            "similarity": similarities.values,
-        }
-    )
-
-
-    return result.reset_index(
-        drop=True
-    )
-
-
-# =============================================================================
-# RECOMMANDATION
-# =============================================================================
-
-def recommend_resources(
-    user,
-    similarity_matrix=None,
-    user_resource_matrix=None,
-    n_users=10,
-    n_recommendations=10
-):
-    """
-    Génère des recommandations personnalisées.
-
-    Méthode
-    -------
-    1. Trouver les utilisateurs similaires.
-    2. Récupérer leurs ressources.
-    3. Exclure les ressources déjà utilisées.
-    4. Pondérer chaque ressource par la similarité
-       de l'utilisateur qui la possède.
-    5. Classer les ressources.
-
-    Parameters
-    ----------
-    user : str
-        Utilisateur cible.
-
-    similarity_matrix : DataFrame
-        Matrice Cosine.
-
-    user_resource_matrix : DataFrame
-        Matrice utilisateur × ressource.
-
-    n_users : int
-        Nombre d'utilisateurs similaires.
-
-    n_recommendations : int
-        Nombre de recommandations.
-
-    Returns
-    -------
-    pandas.DataFrame
-    """
-
-    if similarity_matrix is None:
-
-        similarity_matrix = (
-            load_cosine_similarity()
-        )
-
-
-    if user_resource_matrix is None:
-
-        user_resource_matrix = (
-            load_user_resource_matrix()
-        )
-
-
-    # =========================================================================
-    # 1. RESSOURCES DÉJÀ UTILISÉES
-    # =========================================================================
-
-    current_resources = set(
-        get_user_resources(
-            user,
-            user_resource_matrix
-        )
-    )
-
-
-    # =========================================================================
-    # 2. UTILISATEURS SIMILAIRES
-    # =========================================================================
-
-    similar_users = get_similar_users(
-        user,
-        similarity_matrix,
-        n=n_users
-    )
-
-
-    if similar_users.empty:
+    if user_neighbors.empty:
 
         return pd.DataFrame(
             columns=[
                 "resource",
-                "score",
-                "support_count",
-                "average_similarity",
-                "score_percent",
+                "collaborative_score",
+                "support_users"
             ]
         )
 
+    scores = {}
 
-    # =========================================================================
-    # 3. CALCUL DES SCORES
-    # =========================================================================
+    # --------------------------------------------------------
+    # Parcours des utilisateurs similaires
+    # --------------------------------------------------------
 
-    resource_scores = {}
+    for _, neighbor in user_neighbors.iterrows():
 
-    resource_support = {}
-
-    resource_similarities = {}
-
-
-    for _, row in similar_users.iterrows():
-
-        similar_user = row[
-            "user"
-        ]
+        similar_user = neighbor["similar_user"]
 
         similarity = float(
-            row[
-                "similarity"
-            ]
+            neighbor["similarity"]
         )
 
-
-        # -------------------------------------------------------------
         # Ressources du voisin
-        # -------------------------------------------------------------
+        similar_resources = interactions.loc[
+            interactions["users"] == similar_user,
+            "resource"
+        ]
 
-        neighbor_resources = (
-            get_user_resources(
-                similar_user,
-                user_resource_matrix
-            )
-        )
+        # ----------------------------------------------------
+        # Pondération par similarité
+        # ----------------------------------------------------
 
+        for resource in similar_resources:
 
-        for resource in neighbor_resources:
-
-            # ---------------------------------------------------------
-            # On ne recommande pas une ressource déjà utilisée.
-            # ---------------------------------------------------------
-
-            if resource in current_resources:
-
+            # Ne jamais recommander une ressource
+            # déjà utilisée
+            if resource in user_resources:
                 continue
 
-
-            # ---------------------------------------------------------
-            # Score pondéré par la similarité.
-            # ---------------------------------------------------------
-
-            resource_scores[
-                resource
-            ] = (
-                resource_scores.get(
-                    resource,
-                    0
-                )
+            scores[resource] = (
+                scores.get(resource, 0.0)
                 + similarity
             )
 
+    # --------------------------------------------------------
+    # Aucun résultat
+    # --------------------------------------------------------
 
-            # ---------------------------------------------------------
-            # Nombre d'utilisateurs similaires
-            # utilisant cette ressource.
-            # ---------------------------------------------------------
-
-            resource_support[
-                resource
-            ] = (
-                resource_support.get(
-                    resource,
-                    0
-                )
-                + 1
-            )
-
-
-            # ---------------------------------------------------------
-            # Conservation des similarités.
-            # ---------------------------------------------------------
-
-            if resource not in resource_similarities:
-
-                resource_similarities[
-                    resource
-                ] = []
-
-
-            resource_similarities[
-                resource
-            ].append(
-                similarity
-            )
-
-
-    # =========================================================================
-    # 4. AUCUNE RECOMMANDATION
-    # =========================================================================
-
-    if not resource_scores:
+    if not scores:
 
         return pd.DataFrame(
             columns=[
                 "resource",
-                "score",
-                "support_count",
-                "average_similarity",
-                "score_percent",
+                "collaborative_score",
+                "support_users"
             ]
         )
 
+    # --------------------------------------------------------
+    # Conversion en DataFrame
+    # --------------------------------------------------------
 
-    # =========================================================================
-    # 5. CONSTRUCTION DU DATAFRAME
-    # =========================================================================
-
-    recommendations = []
-
-
-    for resource, score in resource_scores.items():
-
-        similarities = (
-            resource_similarities[
-                resource
-            ]
-        )
-
-
-        average_similarity = (
-            np.mean(
-                similarities
-            )
-        )
-
-
-        recommendations.append(
-            {
-                "resource": resource,
-
-                "score": score,
-
-                "support_count": (
-                    resource_support[
-                        resource
-                    ]
-                ),
-
-                "average_similarity": (
-                    average_similarity
-                ),
-            }
-        )
-
-
-    recommendations = pd.DataFrame(
-        recommendations
+    result = pd.DataFrame(
+        list(scores.items()),
+        columns=[
+            "resource",
+            "collaborative_score"
+        ]
     )
 
+    # --------------------------------------------------------
+    # Normalisation
+    # --------------------------------------------------------
 
-    # =========================================================================
-    # 6. NORMALISATION DU SCORE
-    # =========================================================================
-
-    max_score = (
-        recommendations[
-            "score"
-        ].max()
-    )
-
+    max_score = result[
+        "collaborative_score"
+    ].max()
 
     if max_score > 0:
 
-        recommendations[
-            "score_percent"
-        ] = (
-            recommendations[
-                "score"
-            ]
+        result["collaborative_score"] = (
+            result["collaborative_score"]
             / max_score
-            * 100
         )
 
-    else:
+    # --------------------------------------------------------
+    # Support utilisateur
+    # --------------------------------------------------------
 
-        recommendations[
-            "score_percent"
-        ] = 0
-
-
-    # =========================================================================
-    # 7. TRI FINAL
-    # =========================================================================
-
-    recommendations = (
-        recommendations
-        .sort_values(
-            by=[
-                "score",
-                "support_count",
-                "average_similarity",
-            ],
-            ascending=False
-        )
-    )
-
-
-    # =========================================================================
-    # 8. TOP N
-    # =========================================================================
-
-    recommendations = (
-        recommendations
-        .head(
-            n_recommendations
-        )
+    support = (
+        interactions
+        .groupby("resource")["users"]
+        .nunique()
         .reset_index(
-            drop=True
+            name="support_users"
         )
     )
 
+    result = result.merge(
+        support,
+        on="resource",
+        how="left"
+    )
 
-    return recommendations
+    return result
 
 
-# =============================================================================
-# POPULARITÉ
-# =============================================================================
+# ============================================================
+# RECOMMANDATION HYBRIDE
+# ============================================================
 
-def popular_resources(
+def recommend(
     user,
-    user_resource_matrix=None,
-    n=10
+    top_n=10
 ):
     """
-    Retourne les ressources les plus populaires.
-
-    Cette méthode constitue une baseline simple.
-
-    Une ressource populaire est une ressource utilisée
-    par beaucoup d'utilisateurs.
-
-    Parameters
-    ----------
-    user : str
-
-    user_resource_matrix : DataFrame
-
-    n : int
-
-    Returns
-    -------
-    pandas.DataFrame
+    Génère les recommandations hybrides.
     """
 
-    if user_resource_matrix is None:
+    interactions, neighbors = load_data()
 
-        user_resource_matrix = (
-            load_user_resource_matrix()
+    # --------------------------------------------------------
+    # Vérification utilisateur
+    # --------------------------------------------------------
+
+    if user not in interactions["users"].values:
+
+        raise ValueError(
+            f"Utilisateur inconnu : {user}"
         )
 
+    # --------------------------------------------------------
+    # Liste des ressources
+    # --------------------------------------------------------
 
-    current_resources = set(
-        get_user_resources(
+    resources = (
+        interactions[
+            [
+                "resource",
+                "site",
+                "sous-site",
+                "bibliothèque",
+                "liste"
+            ]
+        ]
+        .drop_duplicates(
+            subset=["resource"]
+        )
+    )
+
+    # --------------------------------------------------------
+    # SCORE COLLABORATIF
+    # --------------------------------------------------------
+
+    collaborative = (
+        collaborative_recommendations(
             user,
-            user_resource_matrix
+            interactions,
+            neighbors
         )
     )
 
+    # --------------------------------------------------------
+    # Si aucun résultat collaboratif
+    # --------------------------------------------------------
 
-    # -------------------------------------------------------------------------
-    # Nombre d'utilisateurs par ressource
-    # -------------------------------------------------------------------------
+    if collaborative.empty:
 
-    popularity = (
-        user_resource_matrix
-        .sum(axis=0)
-    )
-
-
-    popularity = (
-        popularity
-        .sort_values(
-            ascending=False
+        return popularity_fallback(
+            user,
+            interactions,
+            top_n
         )
+
+    # --------------------------------------------------------
+    # SCORE POPULARITÉ
+    # --------------------------------------------------------
+
+    popularity = calculate_popularity(
+        interactions
     )
 
+    # --------------------------------------------------------
+    # Fusion collaborative + ressources
+    # --------------------------------------------------------
 
-    # -------------------------------------------------------------------------
-    # Suppression des ressources déjà utilisées
-    # -------------------------------------------------------------------------
+    result = resources.merge(
+        collaborative[
+            [
+                "resource",
+                "collaborative_score",
+                "support_users"
+            ]
+        ],
+        on="resource",
+        how="inner"
+    )
 
-    popularity = popularity[
-        ~popularity.index.isin(
-            current_resources
+    # --------------------------------------------------------
+    # Popularité
+    # --------------------------------------------------------
+
+    result = result.merge(
+        popularity[
+            [
+                "resource",
+                "popularity_score"
+            ]
+        ],
+        on="resource",
+        how="left"
+    )
+
+    # --------------------------------------------------------
+    # SCORE CONTEXTUEL
+    # --------------------------------------------------------
+
+    result["context_score"] = result.apply(
+        lambda row:
+        calculate_context_score(
+            user,
+            row,
+            interactions
+        ),
+        axis=1
+    )
+
+    # --------------------------------------------------------
+    # Valeurs manquantes
+    # --------------------------------------------------------
+
+    result[
+        [
+            "collaborative_score",
+            "popularity_score",
+            "context_score"
+        ]
+    ] = result[
+        [
+            "collaborative_score",
+            "popularity_score",
+            "context_score"
+        ]
+    ].fillna(0)
+
+    # --------------------------------------------------------
+    # SCORE FINAL
+    # --------------------------------------------------------
+
+    result["final_score"] = (
+
+        COLLAB_WEIGHT
+        * result["collaborative_score"]
+
+        +
+
+        POPULARITY_WEIGHT
+        * result["popularity_score"]
+
+        +
+
+        CONTEXT_WEIGHT
+        * result["context_score"]
+    )
+
+    # --------------------------------------------------------
+    # POURCENTAGE
+    # --------------------------------------------------------
+
+    result["score_percent"] = (
+        result["final_score"] * 100
+    ).round(2)
+
+    # --------------------------------------------------------
+    # TYPE
+    # --------------------------------------------------------
+
+    result["recommendation_type"] = "Hybride"
+
+    # --------------------------------------------------------
+    # TRI
+    # --------------------------------------------------------
+
+    result = result.sort_values(
+        "final_score",
+        ascending=False
+    )
+
+    return result.head(top_n)
+
+
+# ============================================================
+# FALLBACK POPULARITÉ
+# ============================================================
+
+def popularity_fallback(
+    user,
+    interactions,
+    top_n=10
+):
+    """
+    Fallback utilisé lorsqu'aucune recommandation
+    collaborative n'est disponible.
+
+    On recommande alors les ressources les plus populaires
+    que l'utilisateur n'utilise pas encore.
+    """
+
+    # Ressources déjà utilisées
+    user_resources = set(
+        interactions.loc[
+            interactions["users"] == user,
+            "resource"
+        ]
+    )
+
+    # Popularité
+    popularity = calculate_popularity(
+        interactions
+    )
+
+    # Ressources
+    resources = (
+        interactions[
+            [
+                "resource",
+                "site",
+                "sous-site",
+                "bibliothèque",
+                "liste"
+            ]
+        ]
+        .drop_duplicates("resource")
+    )
+
+    # Fusion
+    result = resources.merge(
+        popularity,
+        on="resource",
+        how="left"
+    )
+
+    # Exclusion
+    result = result[
+        ~result["resource"].isin(
+            user_resources
         )
     ]
 
-
-    popularity = (
-        popularity
-        .head(n)
+    # Score
+    result["final_score"] = (
+        result["popularity_score"]
     )
 
+    result["score_percent"] = (
+        result["final_score"] * 100
+    ).round(2)
 
-    result = pd.DataFrame(
-        {
-            "resource": popularity.index,
-            "users_count": popularity.values,
-        }
+    result["collaborative_score"] = 0.0
+    result["context_score"] = 0.0
+
+    result["recommendation_type"] = (
+        "Popularité"
     )
 
-
-    return result.reset_index(
-        drop=True
-    )
-
-
-# =============================================================================
-# EXPLICATION D'UNE RECOMMANDATION
-# =============================================================================
-
-def explain_recommendation(
-    resource,
-    user,
-    similarity_matrix=None,
-    user_resource_matrix=None,
-    n_users=10
-):
-    """
-    Explique pourquoi une ressource est recommandée.
-
-    Exemple :
-
-        La ressource X est recommandée parce que :
-
-        - Fabien est similaire à Yann à 82 %
-        - Isabelle est similaire à Yann à 76 %
-        - ces deux utilisateurs utilisent X
-
-    Returns
-    -------
-    dict
-    """
-
-    if similarity_matrix is None:
-
-        similarity_matrix = (
-            load_cosine_similarity()
+    return (
+        result
+        .sort_values(
+            "final_score",
+            ascending=False
         )
-
-
-    if user_resource_matrix is None:
-
-        user_resource_matrix = (
-            load_user_resource_matrix()
-        )
-
-
-    similar_users = get_similar_users(
-        user,
-        similarity_matrix,
-        n=n_users
+        .head(top_n)
     )
 
 
-    supporting_users = []
-
-
-    for _, row in similar_users.iterrows():
-
-        similar_user = row[
-            "user"
-        ]
-
-        similarity = float(
-            row[
-                "similarity"
-            ]
-        )
-
-
-        resources = get_user_resources(
-            similar_user,
-            user_resource_matrix
-        )
-
-
-        if resource in resources:
-
-            supporting_users.append(
-                {
-                    "user": similar_user,
-                    "similarity": similarity,
-                }
-            )
-
-
-    supporting_users = sorted(
-        supporting_users,
-        key=lambda x: x[
-            "similarity"
-        ],
-        reverse=True
-    )
-
-
-    return {
-        "resource": resource,
-
-        "support_count": len(
-            supporting_users
-        ),
-
-        "supporting_users": (
-            supporting_users
-        ),
-    }
-
-
-# =============================================================================
-# TEST DU MODULE
-# =============================================================================
+# ============================================================
+# PROGRAMME PRINCIPAL
+# ============================================================
 
 if __name__ == "__main__":
 
-    print()
-    print(
-        "=" * 70
-    )
+    print("=" * 70)
+    print("SHAREPOINT RECOMMENDER V3")
+    print("=" * 70)
 
-    print(
-        "TEST DU SYSTÈME DE RECOMMANDATION"
-    )
+    user = input(
+        "\nUtilisateur : "
+    ).strip()
 
-    print(
-        "=" * 70
-    )
+    try:
 
-
-    # -------------------------------------------------------------------------
-    # Chargement
-    # -------------------------------------------------------------------------
-
-    matrix = (
-        load_user_resource_matrix()
-    )
-
-    cosine = (
-        load_cosine_similarity()
-    )
-
-
-    print(
-        f"\n👥 Utilisateurs : {len(matrix.index)}"
-    )
-
-    print(
-        f"📚 Ressources : {len(matrix.columns)}"
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Sélection automatique d'un utilisateur
-    #
-    # On prend ici un utilisateur ayant
-    # au moins une interaction.
-    # -------------------------------------------------------------------------
-
-    users_with_resources = (
-        matrix.sum(axis=1)
-        .sort_values(
-            ascending=False
+        recommendations = recommend(
+            user,
+            top_n=10
         )
-    )
 
-
-    selected_user = (
-        users_with_resources
-        .index[0]
-    )
-
-
-    print(
-        f"\n👤 Utilisateur de test : "
-        f"{selected_user}"
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Ressources actuelles
-    # -------------------------------------------------------------------------
-
-    current = get_user_resources(
-        selected_user,
-        matrix
-    )
-
-
-    print(
-        f"\n📚 Ressources actuelles : "
-        f"{len(current)}"
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Utilisateurs similaires
-    # -------------------------------------------------------------------------
-
-    similar = get_similar_users(
-        selected_user,
-        cosine,
-        n=10
-    )
-
-
-    print(
-        "\n👥 Utilisateurs similaires :"
-    )
-
-
-    print(
-        similar.to_string(
-            index=False
+        print("\n" + "=" * 70)
+        print(
+            f"RECOMMANDATIONS POUR : {user}"
         )
-    )
-
-
-    # -------------------------------------------------------------------------
-    # Recommandations
-    # -------------------------------------------------------------------------
-
-    recommendations = (
-        recommend_resources(
-            user=selected_user,
-
-            similarity_matrix=cosine,
-
-            user_resource_matrix=matrix,
-
-            n_users=10,
-
-            n_recommendations=10,
-        )
-    )
-
-
-    print(
-        "\n🎯 RECOMMANDATIONS :"
-    )
-
-
-    if recommendations.empty:
+        print("=" * 70)
 
         print(
-            "Aucune recommandation disponible."
-        )
-
-    else:
-
-        print(
-            recommendations.to_string(
+            recommendations[
+                [
+                    "resource",
+                    "site",
+                    "sous-site",
+                    "bibliothèque",
+                    "liste",
+                    "collaborative_score",
+                    "popularity_score",
+                    "context_score",
+                    "score_percent",
+                    "support_users",
+                    "recommendation_type"
+                ]
+            ].to_string(
                 index=False
             )
         )
 
+    except Exception as e:
 
-    print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        "TEST TERMINÉ"
-    )
-
-    print(
-        "=" * 70
-    )
+        print(
+            f"\nErreur : {e}"
+        )

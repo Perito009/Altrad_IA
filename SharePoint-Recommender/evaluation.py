@@ -1,85 +1,84 @@
 """
 ===============================================================================
-                    SHAREPOINT RECOMMENDER - EVALUATION
+                    SHAREPOINT RECOMMENDER V2
+                           EVALUATION
 ===============================================================================
 
-Evaluation du moteur de recommandation.
+Evaluation du système de recommandation.
 
 Métriques :
 
     Precision@K
     Recall@K
     Hit Rate@K
+    NDCG@K
 
-Principe du test :
+Attention :
 
-    1. On retire temporairement certaines ressources
-       utilisées par l'utilisateur.
+Cette première version utilise une interaction masquée
+par utilisateur.
 
-    2. Le moteur produit des recommandations.
-
-    3. On regarde si les ressources retirées
-       sont retrouvées.
+Pour une évaluation industrielle, on pourra ensuite
+mettre en place une séparation temporelle ou un
+train/test split plus complet.
 
 ===============================================================================
 """
 
 from pathlib import Path
 
+import math
 import pandas as pd
 
-from recommender import recommend_resources
-
-
-PROCESSED_PATH = Path("processed")
-
-USER_RESOURCE_FILE = (
-    PROCESSED_PATH / "user_resource.parquet"
-)
-
-COSINE_FILE = (
-    PROCESSED_PATH / "cosine_similarity.parquet"
+from recommender import (
+    recommend_resources
 )
 
 
 # =============================================================================
-# CHARGEMENT
+# CONFIGURATION
 # =============================================================================
 
-def load_matrices():
+PROCESSED_PATH = Path(
+    "processed"
+)
 
-    matrix = pd.read_parquet(
-        USER_RESOURCE_FILE
-    )
+INTERACTIONS_FILE = (
+    PROCESSED_PATH
+    / "interactions.parquet"
+)
 
-    similarity = pd.read_parquet(
-        COSINE_FILE
-    )
+NEIGHBORS_FILE = (
+    PROCESSED_PATH
+    / "user_neighbors.parquet"
+)
 
-    return matrix, similarity
+CLEAN_DATA_FILE = (
+    PROCESSED_PATH
+    / "clean_data.parquet"
+)
 
 
 # =============================================================================
-# PRECISION @ K
+# PRECISION@K
 # =============================================================================
 
 def precision_at_k(
-    recommended: list,
-    relevant: set,
-    k: int,
-) -> float:
+    recommended,
+    relevant,
+    k
+):
     """
-    Calcule Precision@K.
-
-    Precision@K =
-        nombre de recommandations pertinentes
-        -------------------------------------
-        K
+    Nombre de recommandations pertinentes
+    parmi les K premières recommandations.
     """
 
-    recommended = recommended[:k]
+    recommended = recommended[
+        :k
+    ]
 
     if not recommended:
+
         return 0.0
 
     hits = sum(
@@ -87,50 +86,60 @@ def precision_at_k(
         for item in recommended
     )
 
-    return hits / len(recommended)
+    return hits / len(
+        recommended
+    )
 
 
 # =============================================================================
-# RECALL @ K
+# RECALL@K
 # =============================================================================
 
 def recall_at_k(
-    recommended: list,
-    relevant: set,
-    k: int,
-) -> float:
+    recommended,
+    relevant,
+    k
+):
     """
-    Calcule Recall@K.
+    Part des éléments pertinents retrouvés
+    dans les K recommandations.
     """
 
     if not relevant:
+
         return 0.0
 
-    recommended = recommended[:k]
+    recommended = recommended[
+        :k
+    ]
 
     hits = sum(
         item in relevant
         for item in recommended
     )
 
-    return hits / len(relevant)
+    return hits / len(
+        relevant
+    )
 
 
 # =============================================================================
-# HIT RATE @ K
+# HIT RATE@K
 # =============================================================================
 
 def hit_rate_at_k(
-    recommended: list,
-    relevant: set,
-    k: int,
-) -> float:
+    recommended,
+    relevant,
+    k
+):
     """
-    Retourne 1 si au moins une recommandation
-    est pertinente.
+    Retourne 1 si au moins une ressource
+    pertinente est retrouvée.
     """
 
-    recommended = recommended[:k]
+    recommended = recommended[
+        :k
+    ]
 
     return float(
         any(
@@ -141,202 +150,304 @@ def hit_rate_at_k(
 
 
 # =============================================================================
-# EVALUATION D'UN UTILISATEUR
+# NDCG@K
 # =============================================================================
 
-def evaluate_user(
-    user: str,
-    matrix: pd.DataFrame,
-    similarity: pd.DataFrame,
-    k: int = 10,
-) -> dict:
+def ndcg_at_k(
+    recommended,
+    relevant,
+    k
+):
+    """
+    NDCG mesure la qualité du classement.
 
-    resources = (
-        matrix.loc[user]
-        [matrix.loc[user] > 0]
-        .index
+    Une bonne recommandation placée en haut
+    de la liste reçoit plus de poids.
+    """
+
+    recommended = recommended[
+        :k
+    ]
+
+    dcg = 0.0
+
+    for position, item in enumerate(
+        recommended,
+        start=1
+    ):
+
+        if item in relevant:
+
+            dcg += (
+                1
+                / math.log2(
+                    position + 1
+                )
+            )
+
+    ideal_hits = min(
+        len(relevant),
+        k
+    )
+
+    if ideal_hits == 0:
+
+        return 0.0
+
+    idcg = sum(
+        1
+        / math.log2(
+            position + 1
+        )
+        for position in range(
+            1,
+            ideal_hits + 1
+        )
+    )
+
+    return dcg / idcg
+
+
+# =============================================================================
+# EVALUATION
+# =============================================================================
+
+def evaluate(
+    max_users=100,
+    k=10
+):
+
+    interactions = pd.read_parquet(
+        INTERACTIONS_FILE
+    )
+
+    neighbors = pd.read_parquet(
+        NEIGHBORS_FILE
+    )
+
+    clean_data = pd.read_parquet(
+        CLEAN_DATA_FILE
+    )
+
+    users = (
+        interactions[
+            "user"
+        ]
+        .unique()
         .tolist()
     )
 
-    # Il faut suffisamment de ressources
-    # pour créer un test.
-    if len(resources) < 2:
-
-        return {
-            "user": user,
-            "precision": 0.0,
-            "recall": 0.0,
-            "hit_rate": 0.0,
-        }
-
-    # Une ressource sert de test.
-    hidden_resource = resources[-1]
-
-    # Copie de la matrice.
-    test_matrix = matrix.copy()
-
-    test_matrix.loc[
-        user,
-        hidden_resource,
-    ] = 0
-
-    # Génération des recommandations.
-    recommendations = recommend_resources(
-        user=user,
-        similarity_matrix=similarity,
-        user_resource_matrix=test_matrix,
-        n_users=10,
-        n_recommendations=k,
-    )
-
-    if recommendations.empty:
-
-        recommended = []
-
-    else:
-
-        recommended = (
-            recommendations[
-                "resource"
-            ]
-            .tolist()
-        )
-
-    relevant = {
-        hidden_resource
-    }
-
-    return {
-        "user": user,
-        "precision": precision_at_k(
-            recommended,
-            relevant,
-            k,
-        ),
-        "recall": recall_at_k(
-            recommended,
-            relevant,
-            k,
-        ),
-        "hit_rate": hit_rate_at_k(
-            recommended,
-            relevant,
-            k,
-        ),
-    }
-
-
-# =============================================================================
-# EVALUATION GLOBALE
-# =============================================================================
-
-def evaluate_model(
-    max_users: int = 100,
-    k: int = 10,
-) -> pd.DataFrame:
-    """
-    Évalue le moteur sur plusieurs utilisateurs.
-
-    Parameters
-    ----------
-    max_users : int
-        Nombre maximal d'utilisateurs évalués.
-
-    k : int
-        Nombre de recommandations.
-
-    Returns
-    -------
-    pd.DataFrame
-    """
-
-    matrix, similarity = load_matrices()
-
-    # On limite le nombre d'utilisateurs
-    # pour garder l'évaluation rapide.
-    users = matrix.index[:max_users]
+    users = users[
+        :max_users
+    ]
 
     results = []
 
     for user in users:
 
-        result = evaluate_user(
-            user=user,
-            matrix=matrix,
-            similarity=similarity,
-            k=k,
+        user_rows = interactions[
+            interactions["user"] == user
+        ]
+
+        # Il faut au minimum deux ressources
+        # pour cacher une interaction.
+        if len(user_rows) < 2:
+
+            continue
+
+        # ---------------------------------------------------------------------
+        # Ressource cachée
+        # ---------------------------------------------------------------------
+
+        hidden_row = (
+            user_rows.iloc[-1]
         )
 
-        results.append(result)
+        hidden_resource = (
+            hidden_row[
+                "resource"
+            ]
+        )
 
-    return pd.DataFrame(results)
+        # ---------------------------------------------------------------------
+        # Dataset d'entraînement temporaire
+        # ---------------------------------------------------------------------
+
+        train_interactions = (
+            interactions.drop(
+                index=hidden_row.name
+            )
+        )
+
+        # ---------------------------------------------------------------------
+        # Recommandations
+        # ---------------------------------------------------------------------
+
+        recommendations = (
+            recommend_resources(
+                user=user,
+                interactions=
+                    train_interactions,
+                neighbors=neighbors,
+                clean_data=clean_data,
+                n_users=10,
+                n_recommendations=k
+            )
+        )
+
+        if recommendations.empty:
+
+            recommended = []
+
+        else:
+
+            recommended = (
+                recommendations[
+                    "resource"
+                ]
+                .tolist()
+            )
+
+        relevant = {
+            hidden_resource
+        }
+
+        results.append(
+            {
+                "user": user,
+
+                "precision_at_k":
+                    precision_at_k(
+                        recommended,
+                        relevant,
+                        k
+                    ),
+
+                "recall_at_k":
+                    recall_at_k(
+                        recommended,
+                        relevant,
+                        k
+                    ),
+
+                "hit_rate_at_k":
+                    hit_rate_at_k(
+                        recommended,
+                        relevant,
+                        k
+                    ),
+
+                "ndcg_at_k":
+                    ndcg_at_k(
+                        recommended,
+                        relevant,
+                        k
+                    ),
+            }
+        )
+
+    return pd.DataFrame(
+        results
+    )
 
 
 # =============================================================================
 # RESUME
 # =============================================================================
 
-def summarize_evaluation(
-    results: pd.DataFrame,
-) -> dict:
-    """
-    Calcule les moyennes globales.
-    """
+def summarize(
+    results
+):
+
+    if results.empty:
+
+        return {
+            "precision": 0,
+            "recall": 0,
+            "hit_rate": 0,
+            "ndcg": 0
+        }
 
     return {
-        "precision_at_k": round(
-            results["precision"].mean(),
-            4,
-        ),
-        "recall_at_k": round(
-            results["recall"].mean(),
-            4,
-        ),
-        "hit_rate_at_k": round(
-            results["hit_rate"].mean(),
-            4,
-        ),
+        "precision":
+            round(
+                results[
+                    "precision_at_k"
+                ].mean(),
+                4
+            ),
+
+        "recall":
+            round(
+                results[
+                    "recall_at_k"
+                ].mean(),
+                4
+            ),
+
+        "hit_rate":
+            round(
+                results[
+                    "hit_rate_at_k"
+                ].mean(),
+                4
+            ),
+
+        "ndcg":
+            round(
+                results[
+                    "ndcg_at_k"
+                ].mean(),
+                4
+            ),
     }
 
 
 # =============================================================================
-# TEST
+# EXECUTION
 # =============================================================================
 
 if __name__ == "__main__":
 
-    results = evaluate_model(
+    print()
+    print("=" * 70)
+    print(
+        "EVALUATION DU SYSTEME V2"
+    )
+    print("=" * 70)
+
+    results = evaluate(
         max_users=100,
-        k=10,
+        k=10
     )
 
-    summary = summarize_evaluation(
+    summary = summarize(
         results
     )
 
+    print()
+
     print(
-        "\n======================================"
+        f"Utilisateurs évalués : "
+        f"{len(results)}"
     )
 
     print(
-        "EVALUATION DU MODELE"
-    )
-
-    print(
-        "======================================"
-    )
-
-    print(
-        f"\nPrecision@10 : "
-        f"{summary['precision_at_k']}"
+        f"Precision@10 : "
+        f"{summary['precision']}"
     )
 
     print(
         f"Recall@10    : "
-        f"{summary['recall_at_k']}"
+        f"{summary['recall']}"
     )
 
     print(
         f"Hit Rate@10  : "
-        f"{summary['hit_rate_at_k']}"
+        f"{summary['hit_rate']}"
+    )
+
+    print(
+        f"NDCG@10      : "
+        f"{summary['ndcg']}"
     )
