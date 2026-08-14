@@ -1,182 +1,210 @@
 """
-===============================================================================
-                    SHAREPOINT RECOMMENDER V2
-                           EVALUATION
-===============================================================================
+============================================================
+SHAREPOINT RECOMMENDER - EVALUATION V3
+============================================================
 
 Evaluation du système de recommandation.
 
 Métriques :
 
-    Precision@K
-    Recall@K
-    Hit Rate@K
-    NDCG@K
+    Precision@10
+    Recall@10
+    Hit Rate@10
+    NDCG@10
 
-Attention :
+Méthode :
 
-Cette première version utilise une interaction masquée
-par utilisateur.
+Pour chaque utilisateur :
 
-Pour une évaluation industrielle, on pourra ensuite
-mettre en place une séparation temporelle ou un
-train/test split plus complet.
+    1. Une partie de ses interactions est masquée.
+    2. Le système produit des recommandations.
+    3. Les recommandations sont comparées aux interactions
+       réellement présentes dans la partie test.
 
-===============================================================================
+Cela permet d'évaluer la capacité du modèle à retrouver
+des ressources connues mais volontairement masquées.
 """
 
 from pathlib import Path
-
+import sys
 import math
+
 import pandas as pd
 
-from recommender import (
-    recommend_resources
-)
 
+# ============================================================
+# CHEMINS
+# ============================================================
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
-
-PROCESSED_PATH = Path(
-    "processed"
-)
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
+PROCESSED_DIR = PROJECT_DIR / "processed"
 
 INTERACTIONS_FILE = (
-    PROCESSED_PATH
-    / "interactions.parquet"
+    PROCESSED_DIR / "interactions.parquet"
+)
+
+RESOURCES_FILE = (
+    PROCESSED_DIR / "resources.parquet"
 )
 
 NEIGHBORS_FILE = (
-    PROCESSED_PATH
-    / "user_neighbors.parquet"
+    PROCESSED_DIR / "user_neighbors.parquet"
 )
 
-CLEAN_DATA_FILE = (
-    PROCESSED_PATH
-    / "clean_data.parquet"
+POPULARITY_FILE = (
+    PROCESSED_DIR / "resource_popularity.parquet"
 )
 
 
-# =============================================================================
+# ============================================================
+# IMPORT DU RECOMMENDER
+# ============================================================
+
+# Permet d'importer recommender.py lorsqu'on exécute
+# evaluation.py depuis la racine du projet.
+
+sys.path.insert(
+    0,
+    str(BASE_DIR)
+)
+
+from recommender import recommend
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+TOP_K = 10
+
+# Nombre maximum d'utilisateurs évalués.
+# 100 permet d'avoir une évaluation suffisamment rapide.
+MAX_USERS = 100
+
+# Proportion des interactions conservées pour le test.
+TEST_RATIO = 0.20
+
+RANDOM_STATE = 42
+
+
+# ============================================================
 # PRECISION@K
-# =============================================================================
+# ============================================================
 
 def precision_at_k(
     recommended,
     relevant,
-    k
+    k=10
 ):
     """
-    Nombre de recommandations pertinentes
-    parmi les K premières recommandations.
+    Precision@K :
+
+        nombre de recommandations pertinentes
+        -------------------------------------
+                    K
     """
 
-    recommended = recommended[
-        :k
-    ]
+    recommended = recommended[:k]
 
     if not recommended:
-
         return 0.0
 
-    hits = sum(
-        item in relevant
-        for item in recommended
+    hits = len(
+        set(recommended)
+        & set(relevant)
     )
 
-    return hits / len(
-        recommended
-    )
+    return hits / k
 
 
-# =============================================================================
+# ============================================================
 # RECALL@K
-# =============================================================================
+# ============================================================
 
 def recall_at_k(
     recommended,
     relevant,
-    k
+    k=10
 ):
     """
-    Part des éléments pertinents retrouvés
-    dans les K recommandations.
+    Recall@K :
+
+        nombre de recommandations pertinentes
+        -------------------------------------
+        nombre total de ressources pertinentes
     """
 
     if not relevant:
-
         return 0.0
 
-    recommended = recommended[
-        :k
-    ]
+    recommended = recommended[:k]
 
-    hits = sum(
-        item in relevant
-        for item in recommended
+    hits = len(
+        set(recommended)
+        & set(relevant)
     )
 
-    return hits / len(
-        relevant
-    )
+    return hits / len(relevant)
 
 
-# =============================================================================
+# ============================================================
 # HIT RATE@K
-# =============================================================================
+# ============================================================
 
 def hit_rate_at_k(
     recommended,
     relevant,
-    k
+    k=10
 ):
     """
-    Retourne 1 si au moins une ressource
-    pertinente est retrouvée.
+    Retourne 1 si au moins une ressource pertinente
+    apparaît dans les K recommandations.
     """
 
-    recommended = recommended[
-        :k
-    ]
+    recommended = recommended[:k]
 
     return float(
-        any(
-            item in relevant
-            for item in recommended
-        )
+        len(
+            set(recommended)
+            & set(relevant)
+        ) > 0
     )
 
 
-# =============================================================================
+# ============================================================
 # NDCG@K
-# =============================================================================
+# ============================================================
 
 def ndcg_at_k(
     recommended,
     relevant,
-    k
+    k=10
 ):
     """
-    NDCG mesure la qualité du classement.
+    Normalized Discounted Cumulative Gain.
 
-    Une bonne recommandation placée en haut
-    de la liste reçoit plus de poids.
+    Cette métrique prend en compte la position
+    de la recommandation.
+
+    Une bonne recommandation placée en position 1
+    rapporte davantage qu'une bonne recommandation
+    placée en position 10.
     """
 
-    recommended = recommended[
-        :k
-    ]
+    recommended = recommended[:k]
+
+    relevant = set(relevant)
 
     dcg = 0.0
 
-    for position, item in enumerate(
-        recommended,
-        start=1
+    for index, resource in enumerate(
+        recommended
     ):
 
-        if item in relevant:
+        if resource in relevant:
+
+            position = index + 1
 
             dcg += (
                 1
@@ -185,13 +213,16 @@ def ndcg_at_k(
                 )
             )
 
+    # --------------------------------------------------------
+    # IDCG
+    # --------------------------------------------------------
+
     ideal_hits = min(
         len(relevant),
         k
     )
 
     if ideal_hits == 0:
-
         return 0.0
 
     idcg = sum(
@@ -205,249 +236,337 @@ def ndcg_at_k(
         )
     )
 
+    if idcg == 0:
+        return 0.0
+
     return dcg / idcg
 
 
-# =============================================================================
-# EVALUATION
-# =============================================================================
+# ============================================================
+# EVALUATION D'UN UTILISATEUR
+# ============================================================
 
-def evaluate(
-    max_users=100,
-    k=10
+def evaluate_user(
+    user,
+    train_interactions,
+    test_resources,
+    resources,
+    neighbors,
+    popularity
 ):
+    """
+    Evalue un utilisateur.
+
+    train_interactions :
+        interactions utilisées par le recommender.
+
+    test_resources :
+        ressources volontairement cachées
+        servant de vérité terrain.
+    """
+
+    # --------------------------------------------------------
+    # Recommandations
+    # --------------------------------------------------------
+
+    recommendations = recommend(
+        user=user,
+        interactions=train_interactions,
+        resources=resources,
+        neighbors=neighbors,
+        popularity=popularity,
+        top_n=TOP_K
+    )
+
+    if recommendations.empty:
+
+        return {
+            "precision": 0.0,
+            "recall": 0.0,
+            "hit_rate": 0.0,
+            "ndcg": 0.0
+        }
+
+    recommended_resources = (
+        recommendations[
+            "resource"
+        ]
+        .tolist()
+    )
+
+    relevant_resources = list(
+        test_resources
+    )
+
+    # --------------------------------------------------------
+    # Métriques
+    # --------------------------------------------------------
+
+    precision = precision_at_k(
+        recommended_resources,
+        relevant_resources,
+        TOP_K
+    )
+
+    recall = recall_at_k(
+        recommended_resources,
+        relevant_resources,
+        TOP_K
+    )
+
+    hit_rate = hit_rate_at_k(
+        recommended_resources,
+        relevant_resources,
+        TOP_K
+    )
+
+    ndcg = ndcg_at_k(
+        recommended_resources,
+        relevant_resources,
+        TOP_K
+    )
+
+    return {
+        "precision": precision,
+        "recall": recall,
+        "hit_rate": hit_rate,
+        "ndcg": ndcg
+    }
+
+
+# ============================================================
+# EVALUATION GLOBALE
+# ============================================================
+
+def evaluate():
+
+    print()
+    print("=" * 70)
+    print("EVALUATION DU SYSTEME DE RECOMMANDATION V3")
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # Chargement
+    # --------------------------------------------------------
 
     interactions = pd.read_parquet(
         INTERACTIONS_FILE
+    )
+
+    resources = pd.read_parquet(
+        RESOURCES_FILE
     )
 
     neighbors = pd.read_parquet(
         NEIGHBORS_FILE
     )
 
-    clean_data = pd.read_parquet(
-        CLEAN_DATA_FILE
+    popularity = pd.read_parquet(
+        POPULARITY_FILE
     )
 
+    print(
+        f"\nInteractions : "
+        f"{len(interactions):,}"
+    )
+
+    print(
+        f"Utilisateurs : "
+        f"{interactions['user'].nunique():,}"
+    )
+
+    print(
+        f"Ressources : "
+        f"{interactions['resource'].nunique():,}"
+    )
+
+    # --------------------------------------------------------
+    # Sélection des utilisateurs
+    # --------------------------------------------------------
+
     users = (
-        interactions[
-            "user"
-        ]
-        .unique()
+        interactions["user"]
+        .drop_duplicates()
+        .sort_values()
         .tolist()
     )
 
-    users = users[
-        :max_users
-    ]
+    # Limitation pour accélérer l'évaluation
+    users = users[:MAX_USERS]
+
+    print(
+        f"\nUtilisateurs évalués : "
+        f"{len(users)}"
+    )
+
+    # --------------------------------------------------------
+    # Résultats
+    # --------------------------------------------------------
 
     results = []
 
-    for user in users:
+    # --------------------------------------------------------
+    # Evaluation utilisateur par utilisateur
+    # --------------------------------------------------------
 
-        user_rows = interactions[
+    for user_index, user in enumerate(
+        users,
+        start=1
+    ):
+
+        user_data = interactions[
             interactions["user"] == user
         ]
 
-        # Il faut au minimum deux ressources
-        # pour cacher une interaction.
-        if len(user_rows) < 2:
+        # ----------------------------------------------------
+        # Il faut suffisamment d'interactions
+        # ----------------------------------------------------
 
+        if len(user_data) < 2:
             continue
 
-        # ---------------------------------------------------------------------
-        # Ressource cachée
-        # ---------------------------------------------------------------------
+        # ----------------------------------------------------
+        # Mélange reproductible
+        # ----------------------------------------------------
 
-        hidden_row = (
-            user_rows.iloc[-1]
-        )
-
-        hidden_resource = (
-            hidden_row[
-                "resource"
-            ]
-        )
-
-        # ---------------------------------------------------------------------
-        # Dataset d'entraînement temporaire
-        # ---------------------------------------------------------------------
-
-        train_interactions = (
-            interactions.drop(
-                index=hidden_row.name
+        shuffled = user_data.sample(
+            frac=1.0,
+            random_state=(
+                RANDOM_STATE
+                + user_index
             )
         )
 
-        # ---------------------------------------------------------------------
-        # Recommandations
-        # ---------------------------------------------------------------------
+        # ----------------------------------------------------
+        # Nombre d'interactions de test
+        # ----------------------------------------------------
 
-        recommendations = (
-            recommend_resources(
-                user=user,
-                interactions=
-                    train_interactions,
-                neighbors=neighbors,
-                clean_data=clean_data,
-                n_users=10,
-                n_recommendations=k
+        test_size = max(
+            1,
+            int(
+                len(shuffled)
+                * TEST_RATIO
             )
         )
 
-        if recommendations.empty:
+        # ----------------------------------------------------
+        # Séparation train / test
+        # ----------------------------------------------------
 
-            recommended = []
+        test_part = shuffled.iloc[
+            :test_size
+        ]
 
-        else:
+        train_part = shuffled.iloc[
+            test_size:
+        ]
 
-            recommended = (
-                recommendations[
-                    "resource"
-                ]
-                .tolist()
-            )
+        # ----------------------------------------------------
+        # Sécurité
+        # ----------------------------------------------------
 
-        relevant = {
-            hidden_resource
-        }
+        if train_part.empty:
+            continue
+
+        test_resources = set(
+            test_part["resource"]
+        )
+
+        # ----------------------------------------------------
+        # Evaluation
+        # ----------------------------------------------------
+
+        metrics = evaluate_user(
+            user=user,
+            train_interactions=train_part,
+            test_resources=test_resources,
+            resources=resources,
+            neighbors=neighbors,
+            popularity=popularity
+        )
 
         results.append(
-            {
-                "user": user,
-
-                "precision_at_k":
-                    precision_at_k(
-                        recommended,
-                        relevant,
-                        k
-                    ),
-
-                "recall_at_k":
-                    recall_at_k(
-                        recommended,
-                        relevant,
-                        k
-                    ),
-
-                "hit_rate_at_k":
-                    hit_rate_at_k(
-                        recommended,
-                        relevant,
-                        k
-                    ),
-
-                "ndcg_at_k":
-                    ndcg_at_k(
-                        recommended,
-                        relevant,
-                        k
-                    ),
-            }
+            metrics
         )
 
-    return pd.DataFrame(
+    # ========================================================
+    # RESULTATS
+    # ========================================================
+
+    if not results:
+
+        print(
+            "\nAucun utilisateur n'a pu être évalué."
+        )
+
+        return
+
+    results_df = pd.DataFrame(
         results
     )
 
+    precision = (
+        results_df["precision"]
+        .mean()
+    )
 
-# =============================================================================
-# RESUME
-# =============================================================================
+    recall = (
+        results_df["recall"]
+        .mean()
+    )
 
-def summarize(
-    results
-):
+    hit_rate = (
+        results_df["hit_rate"]
+        .mean()
+    )
 
-    if results.empty:
+    ndcg = (
+        results_df["ndcg"]
+        .mean()
+    )
 
-        return {
-            "precision": 0,
-            "recall": 0,
-            "hit_rate": 0,
-            "ndcg": 0
-        }
-
-    return {
-        "precision":
-            round(
-                results[
-                    "precision_at_k"
-                ].mean(),
-                4
-            ),
-
-        "recall":
-            round(
-                results[
-                    "recall_at_k"
-                ].mean(),
-                4
-            ),
-
-        "hit_rate":
-            round(
-                results[
-                    "hit_rate_at_k"
-                ].mean(),
-                4
-            ),
-
-        "ndcg":
-            round(
-                results[
-                    "ndcg_at_k"
-                ].mean(),
-                4
-            ),
-    }
-
-
-# =============================================================================
-# EXECUTION
-# =============================================================================
-
-if __name__ == "__main__":
+    # ========================================================
+    # AFFICHAGE
+    # ========================================================
 
     print()
     print("=" * 70)
-    print(
-        "EVALUATION DU SYSTEME V2"
-    )
+    print("RESULTATS")
     print("=" * 70)
 
-    results = evaluate(
-        max_users=100,
-        k=10
-    )
-
-    summary = summarize(
-        results
-    )
-
-    print()
-
     print(
-        f"Utilisateurs évalués : "
-        f"{len(results)}"
+        f"\nUtilisateurs évalués : "
+        f"{len(results_df)}"
     )
 
     print(
         f"Precision@10 : "
-        f"{summary['precision']}"
+        f"{precision:.2f}"
     )
 
     print(
         f"Recall@10    : "
-        f"{summary['recall']}"
+        f"{recall:.2f}"
     )
 
     print(
         f"Hit Rate@10  : "
-        f"{summary['hit_rate']}"
+        f"{hit_rate:.2f}"
     )
 
     print(
         f"NDCG@10      : "
-        f"{summary['ndcg']}"
+        f"{ndcg:.2f}"
     )
+
+    print()
+    print("=" * 70)
+
+
+# ============================================================
+# EXECUTION
+# ============================================================
+
+if __name__ == "__main__":
+
+    evaluate()
