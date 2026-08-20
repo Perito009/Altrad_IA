@@ -1,31 +1,107 @@
-name: CI
+name: Altrad IA CI
 
 on:
+
   push:
     branches:
       - main
+      - dev
+
   pull_request:
     branches:
       - main
+      - dev
+
 
 jobs:
-  test:
+
+  pipeline-tests:
+
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
 
-      - name: Set up Python
-        uses: actions/setup-python@v2
+    steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+
         with:
-          python-version: '3.8'
+          python-version: "3.12"
+
+
+      # ======================================================
+      # DEPENDANCES
+      # ======================================================
 
       - name: Install dependencies
         run: |
+
           python -m pip install --upgrade pip
+
           pip install -r requirements.txt
+
+          pip install pytest
+
+
+      # ======================================================
+      # VERIFICATION DU CODE
+      # ======================================================
+
+      - name: Check Python syntax
+        run: |
+
+          python -m compileall SharePoint-Recommender
+          python -m compileall loaderDB.py
+          python -m compileall streamlit_app.py
+
+
+      # ======================================================
+      # PREPROCESSING
+      # ======================================================
+
+      - name: Run preprocessing
+        run: |
+
+          python SharePoint-Recommender/preprocessing.py
+
+
+      # ======================================================
+      # SIMILARITY
+      # ======================================================
+
+      - name: Calculate similarity
+        run: |
+
+          python SharePoint-Recommender/similarity.py
+
+
+      # ======================================================
+      # POPULARITY
+      # ======================================================
+
+      - name: Calculate popularity
+        run: |
+
+          python SharePoint-Recommender/popularity.py
+
+
+      # ======================================================
+      # TESTS
+      # ======================================================
 
       - name: Run tests
         run: |
-          pytest tests/
+
+          pytest tests/ -v
